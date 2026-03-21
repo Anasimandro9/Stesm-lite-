@@ -1,0 +1,24 @@
+[package]
+name = "steamlite"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "steamlite"
+path = "src/main.rs"
+
+[dependencies]
+eframe = { version = "0.27", features = ["default"] }
+egui = "0.27"
+egui_extras = { version = "0.27", features = ["image", "default_fonts"] }
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+open = "5.0"
+image = { version = "0.24", features = ["png", "jpeg"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
