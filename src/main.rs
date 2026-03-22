@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 use eframe::egui;
 use eframe::egui::{Color32, FontId, RichText, Rounding, Stroke, Vec2};
 use serde::{Deserialize, Serialize};
@@ -11,7 +13,7 @@ use std::thread;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Config {
-    steam_id: String,
+    steam_path: String,
 }
 
 fn config_path() -> PathBuf {
@@ -66,95 +68,122 @@ impl Game {
     }
 }
 
-// ===================== API SIN KEY (XML publico) =====================
+// ===================== STEAM LOCAL READER =====================
 
-fn fetch_games_public(steam_id: &str) -> Result<Vec<Game>, String> {
-    let url = format!(
-        "https://steamcommunity.com/profiles/{}/games?xml=1",
-        steam_id
-    );
+fn find_steam_path_auto() -> Option<String> {
+    let candidates = vec![
+        r"C:\Program Files (x86)\Steam",
+        r"C:\Program Files\Steam",
+        r"D:\Steam",
+        r"D:\Program Files (x86)\Steam",
+        r"E:\Steam",
+        r"C:\Steam",
+    ];
 
-    let resp = reqwest::blocking::Client::builder()
-        .user_agent("Mozilla/5.0")
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| e.to_string())?
-        .get(&url)
-        .send()
-        .map_err(|e| format!("No se pudo conectar: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Error HTTP: {}", resp.status()));
+    for path in &candidates {
+        let p = PathBuf::from(path);
+        if p.join("steamapps").exists() {
+            return Some(path.to_string());
+        }
     }
 
-    let body = resp.text().map_err(|e| e.to_string())?;
-
-    // Comprobar si el perfil es privado
-    if body.contains("This profile is private") || body.contains("perfil es privado") {
-        return Err("Tu perfil de Steam es privado. Ve a Steam -> Configuracion -> Privacidad -> Detalles del juego -> Publico".to_string());
+    // Intentar registro de Windows
+    let output = std::process::Command::new("reg")
+        .args(["query", r"HKCU\Software\Valve\Steam", "/v", "SteamPath"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    for line in text.lines() {
+        if line.to_lowercase().contains("steampath") {
+            let parts: Vec<&str> = line.split("    ").collect();
+            if let Some(last) = parts.last() {
+                let path = last.trim().replace("/", "\\");
+                if PathBuf::from(&path).join("steamapps").exists() {
+                    return Some(path);
+                }
+            }
+        }
     }
 
-    // Parsear XML manualmente (sin dependencia extra)
+    None
+}
+
+fn parse_acf_value(content: &str, key: &str) -> Option<String> {
+    let search = format!("\"{}\"", key);
+    let pos = content.find(&search)?;
+    let after = &content[pos + search.len()..];
+    let trimmed = after.trim_start();
+    if trimmed.starts_with('"') {
+        let inner = &trimmed[1..];
+        let end = inner.find('"')?;
+        Some(inner[..end].to_string())
+    } else {
+        None
+    }
+}
+
+fn fetch_games_local(steam_path: &str) -> Result<Vec<Game>, String> {
+    let steamapps = PathBuf::from(steam_path).join("steamapps");
+
+    if !steamapps.exists() {
+        return Err(format!(
+            "No se encontro la carpeta steamapps en:\n{}",
+            steamapps.display()
+        ));
+    }
+
     let mut games = Vec::new();
 
-    for game_block in body.split("<game>") {
-        if !game_block.contains("</game>") {
+    let entries = fs::read_dir(&steamapps)
+        .map_err(|e| format!("Error leyendo steamapps: {}", e))?;
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let filename = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        if !filename.starts_with("appmanifest_") || !filename.ends_with(".acf") {
             continue;
         }
 
-        let appid = extract_xml_u64(game_block, "appID");
-        let name = extract_xml_str(game_block, "name");
-        let playtime = extract_xml_u64(game_block, "hoursOnRecord")
-            .map(|h| h * 60)
-            .or_else(|| extract_xml_f64(game_block, "hoursOnRecord").map(|h| (h * 60.0) as u64))
-            .unwrap_or(0);
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
 
-        if let (Some(appid), Some(name)) = (appid, name) {
-            games.push(Game {
-                appid,
-                name,
-                playtime_forever: playtime,
-            });
-        }
+        let appid: u64 = match parse_acf_value(&content, "appid").and_then(|s| s.parse().ok()) {
+            Some(id) => id,
+            None => continue,
+        };
+
+        let name = match parse_acf_value(&content, "name") {
+            Some(n) => n,
+            None => continue,
+        };
+
+        let playtime = parse_acf_value(&content, "playtime_forever")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0u64);
+
+        games.push(Game {
+            appid,
+            name,
+            playtime_forever: playtime,
+        });
     }
 
     if games.is_empty() {
-        return Err("No se encontraron juegos. Asegurate de que tu perfil sea publico y tenga juegos.".to_string());
+        return Err(format!(
+            "No se encontraron juegos instalados en:\n{}\n\nAsegurate de tener juegos instalados.",
+            steamapps.display()
+        ));
     }
 
     games.sort_by(|a, b| b.playtime_forever.cmp(&a.playtime_forever));
     Ok(games)
-}
-
-fn extract_xml_str(block: &str, tag: &str) -> Option<String> {
-    let open = format!("<{}>", tag);
-    let close = format!("</{}>", tag);
-    let start = block.find(&open)? + open.len();
-    let end = block[start..].find(&close)? + start;
-    let raw = &block[start..end];
-    // Decodificar CDATA si existe
-    let cleaned = if raw.starts_with("<![CDATA[") && raw.ends_with("]]>") {
-        raw[9..raw.len() - 3].to_string()
-    } else {
-        raw.replace("&amp;", "&")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&apos;", "'")
-            .replace("&quot;", "\"")
-    };
-    Some(cleaned)
-}
-
-fn extract_xml_u64(block: &str, tag: &str) -> Option<u64> {
-    extract_xml_str(block, tag)?.trim().parse().ok()
-}
-
-fn extract_xml_f64(block: &str, tag: &str) -> Option<f64> {
-    extract_xml_str(block, tag)?
-        .trim()
-        .replace(",", ".")
-        .parse()
-        .ok()
 }
 
 fn fetch_image(url: &str) -> Option<Vec<u8>> {
@@ -189,8 +218,9 @@ struct SteamLite {
     config: Option<Config>,
 
     // Setup
-    input_steam_id: String,
+    input_steam_path: String,
     setup_error: String,
+    autodetected: bool,
 
     // Library
     games: Arc<Mutex<Vec<Game>>>,
@@ -215,11 +245,15 @@ impl SteamLite {
             Screen::Setup
         };
 
+        // Intentar autodetectar Steam
+        let autodetected_path = find_steam_path_auto().unwrap_or_default();
+
         Self {
             screen,
             config,
-            input_steam_id: String::new(),
+            input_steam_path: autodetected_path.clone(),
             setup_error: String::new(),
+            autodetected: !autodetected_path.is_empty(),
             games: Arc::new(Mutex::new(vec![])),
             loading_games: Arc::new(Mutex::new(false)),
             load_error: Arc::new(Mutex::new(String::new())),
@@ -245,7 +279,7 @@ impl SteamLite {
         *error.lock().unwrap() = String::new();
 
         thread::spawn(move || {
-            match fetch_games_public(&cfg.steam_id) {
+            match fetch_games_local(&cfg.steam_path) {
                 Ok(g) => *games.lock().unwrap() = g,
                 Err(e) => *error.lock().unwrap() = e,
             }
@@ -273,22 +307,22 @@ impl SteamLite {
     }
 
     fn validate_and_save(&mut self) {
-        let steam_id = self.input_steam_id.trim().to_string();
+        let steam_path = self.input_steam_path.trim().to_string();
 
-        if steam_id.is_empty() {
-            self.setup_error = "Necesitas el Steam ID".to_string();
-            return;
-        }
-        if !steam_id.starts_with("765611") || steam_id.len() != 17 {
-            self.setup_error = "El Steam ID debe tener 17 digitos y empezar con 765611".to_string();
-            return;
-        }
-        if steam_id.parse::<u64>().is_err() {
-            self.setup_error = "El Steam ID solo debe contener numeros".to_string();
+        if steam_path.is_empty() {
+            self.setup_error = "Introduce la ruta de Steam".to_string();
             return;
         }
 
-        let config = Config { steam_id };
+        let steamapps = PathBuf::from(&steam_path).join("steamapps");
+        if !steamapps.exists() {
+            self.setup_error = format!(
+                "No se encontro steamapps en esa ruta.\nPrueba con: C:\\Program Files (x86)\\Steam"
+            );
+            return;
+        }
+
+        let config = Config { steam_path };
         save_config(&config);
         self.config = Some(config);
         self.setup_error = String::new();
@@ -328,7 +362,7 @@ impl SteamLite {
                         .inner_margin(egui::Margin::same(32.0))
                         .stroke(Stroke::new(1.0, Color32::from_rgb(40, 55, 80)))
                         .show(ui, |ui| {
-                            ui.set_max_width(480.0);
+                            ui.set_max_width(520.0);
 
                             ui.label(
                                 RichText::new("Configuracion inicial")
@@ -342,50 +376,43 @@ impl SteamLite {
                                     .color(Color32::from_rgb(100, 120, 150)),
                             );
 
-                            ui.add_space(24.0);
+                            ui.add_space(20.0);
+
+                            // Autodeteccion
+                            if self.autodetected {
+                                egui::Frame::none()
+                                    .fill(Color32::from_rgb(15, 40, 20))
+                                    .rounding(Rounding::same(6.0))
+                                    .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                                    .stroke(Stroke::new(1.0, Color32::from_rgb(30, 90, 40)))
+                                    .show(ui, |ui| {
+                                        ui.label(
+                                            RichText::new("Steam detectado automaticamente")
+                                                .font(FontId::proportional(12.0))
+                                                .color(Color32::from_rgb(100, 220, 120)),
+                                        );
+                                    });
+                                ui.add_space(12.0);
+                            }
 
                             ui.label(
-                                RichText::new("Steam ID (64-bit)")
+                                RichText::new("Ruta de Steam")
                                     .font(FontId::proportional(14.0))
                                     .color(Color32::from_rgb(180, 200, 230))
                                     .strong(),
                             );
                             ui.add_space(4.0);
                             ui.add(
-                                egui::TextEdit::singleline(&mut self.input_steam_id)
-                                    .desired_width(420.0)
-                                    .hint_text("Ej: 76561199528188579 (17 digitos)"),
+                                egui::TextEdit::singleline(&mut self.input_steam_path)
+                                    .desired_width(460.0)
+                                    .hint_text(r"C:\Program Files (x86)\Steam"),
                             );
                             ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("Encontralo en: ")
-                                        .font(FontId::proportional(12.0))
-                                        .color(Color32::from_rgb(100, 120, 150)),
-                                );
-                                ui.hyperlink_to(
-                                    RichText::new("steamidfinder.com")
-                                        .font(FontId::proportional(12.0))
-                                        .color(Color32::from_rgb(80, 160, 240)),
-                                    "https://steamidfinder.com",
-                                );
-                            });
-
-                            ui.add_space(12.0);
-
-                            // Info sin API key
-                            egui::Frame::none()
-                                .fill(Color32::from_rgb(15, 30, 45))
-                                .rounding(Rounding::same(6.0))
-                                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-                                .stroke(Stroke::new(1.0, Color32::from_rgb(30, 70, 110)))
-                                .show(ui, |ui| {
-                                    ui.label(
-                                        RichText::new("No necesitas API Key. Solo tu Steam ID y perfil publico.")
-                                            .font(FontId::proportional(12.0))
-                                            .color(Color32::from_rgb(100, 180, 240)),
-                                    );
-                                });
+                            ui.label(
+                                RichText::new("Ruta donde esta instalado Steam (sin la carpeta steamapps)")
+                                    .font(FontId::proportional(11.0))
+                                    .color(Color32::from_rgb(100, 120, 150)),
+                            );
 
                             ui.add_space(20.0);
 
@@ -396,7 +423,7 @@ impl SteamLite {
                                     .inner_margin(egui::Margin::symmetric(12.0, 8.0))
                                     .show(ui, |ui| {
                                         ui.label(
-                                            RichText::new(format!("Error: {}", self.setup_error))
+                                            RichText::new(&self.setup_error)
                                                 .font(FontId::proportional(13.0))
                                                 .color(Color32::from_rgb(255, 120, 120)),
                                         );
@@ -405,7 +432,7 @@ impl SteamLite {
                             }
 
                             let btn = ui.add_sized(
-                                Vec2::new(420.0, 46.0),
+                                Vec2::new(460.0, 46.0),
                                 egui::Button::new(
                                     RichText::new("ENTRAR")
                                         .font(FontId::proportional(17.0))
@@ -432,9 +459,9 @@ impl SteamLite {
                         .inner_margin(egui::Margin::symmetric(20.0, 10.0))
                         .stroke(Stroke::new(1.0, Color32::from_rgb(30, 80, 40)))
                         .show(ui, |ui| {
-                            ui.set_max_width(480.0);
+                            ui.set_max_width(520.0);
                             ui.label(
-                                RichText::new("Tus datos se guardan solo en tu PC. No se envian a ningun servidor externo.")
+                                RichText::new("Lee los juegos directamente de tu PC. Sin internet ni API Key.")
                                     .font(FontId::proportional(12.0))
                                     .color(Color32::from_rgb(100, 180, 120)),
                             );
@@ -448,7 +475,7 @@ impl SteamLite {
 
 impl SteamLite {
     fn show_main(&mut self, ctx: &egui::Context) {
-        // Procesar imagenes descargadas
+        // Procesar imagenes
         {
             let mut pending = self.pending_images.lock().unwrap();
             for (appid, bytes) in pending.drain(..) {
@@ -504,7 +531,7 @@ impl SteamLite {
                         );
                     } else if count > 0 {
                         ui.label(
-                            RichText::new(format!("{} juegos", count))
+                            RichText::new(format!("{} juegos instalados", count))
                                 .font(FontId::proportional(13.0))
                                 .color(Color32::from_rgb(120, 140, 170)),
                         );
@@ -514,7 +541,6 @@ impl SteamLite {
                         if ui.small_button("Cerrar sesion").clicked() {
                             delete_config();
                             self.config = None;
-                            self.input_steam_id = String::new();
                             self.screen = Screen::Setup;
                             *self.games.lock().unwrap() = vec![];
                         }
@@ -574,7 +600,7 @@ impl SteamLite {
                 if games_snap.is_empty() && !*self.loading_games.lock().unwrap() && error.is_empty() {
                     ui.centered_and_justified(|ui| {
                         ui.label(
-                            RichText::new("No se encontraron juegos")
+                            RichText::new("No se encontraron juegos instalados")
                                 .font(FontId::proportional(18.0))
                                 .color(Color32::from_rgb(100, 120, 150)),
                         );
@@ -589,7 +615,9 @@ impl SteamLite {
                     let card_h = 103.0_f32;
                     let spacing = 12.0_f32;
                     let available = ui.available_width() - 24.0;
-                    let cols = ((available + spacing) / (card_w + spacing)).floor().max(1.0) as usize;
+                    let cols = ((available + spacing) / (card_w + spacing))
+                        .floor()
+                        .max(1.0) as usize;
 
                     egui::Grid::new("library")
                         .num_columns(cols)
@@ -614,8 +642,10 @@ impl SteamLite {
                                                     .max_width(card_w)
                                                     .max_height(card_h)
                                                     .rounding(Rounding {
-                                                        nw: 10.0, ne: 10.0,
-                                                        sw: 0.0, se: 0.0,
+                                                        nw: 10.0,
+                                                        ne: 10.0,
+                                                        sw: 0.0,
+                                                        se: 0.0,
                                                     }),
                                             );
                                         } else {
@@ -625,7 +655,12 @@ impl SteamLite {
                                             );
                                             ui.painter().rect_filled(
                                                 rect,
-                                                Rounding { nw: 10.0, ne: 10.0, sw: 0.0, se: 0.0 },
+                                                Rounding {
+                                                    nw: 10.0,
+                                                    ne: 10.0,
+                                                    sw: 0.0,
+                                                    se: 0.0,
+                                                },
                                                 Color32::from_rgb(25, 32, 45),
                                             );
                                             ui.painter().text(
@@ -671,32 +706,38 @@ impl SteamLite {
                                         ui.horizontal(|ui| {
                                             ui.add_space(8.0);
 
-                                            if ui.add(
-                                                egui::Button::new(
-                                                    RichText::new("JUGAR")
-                                                        .font(FontId::proportional(12.0))
-                                                        .color(Color32::WHITE)
-                                                        .strong(),
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new("JUGAR")
+                                                            .font(FontId::proportional(12.0))
+                                                            .color(Color32::WHITE)
+                                                            .strong(),
+                                                    )
+                                                    .fill(Color32::from_rgb(30, 110, 200))
+                                                    .rounding(Rounding::same(5.0))
+                                                    .min_size(Vec2::new(90.0, 26.0)),
                                                 )
-                                                .fill(Color32::from_rgb(30, 110, 200))
-                                                .rounding(Rounding::same(5.0))
-                                                .min_size(Vec2::new(90.0, 26.0)),
-                                            ).clicked() {
+                                                .clicked()
+                                            {
                                                 launch = Some(game.clone());
                                             }
 
                                             ui.add_space(4.0);
 
-                                            if ui.add(
-                                                egui::Button::new(
-                                                    RichText::new("Tienda")
-                                                        .font(FontId::proportional(11.0))
-                                                        .color(Color32::from_rgb(160, 180, 210)),
+                                            if ui
+                                                .add(
+                                                    egui::Button::new(
+                                                        RichText::new("Tienda")
+                                                            .font(FontId::proportional(11.0))
+                                                            .color(Color32::from_rgb(160, 180, 210)),
+                                                    )
+                                                    .fill(Color32::from_rgb(28, 36, 52))
+                                                    .rounding(Rounding::same(5.0))
+                                                    .min_size(Vec2::new(60.0, 26.0)),
                                                 )
-                                                .fill(Color32::from_rgb(28, 36, 52))
-                                                .rounding(Rounding::same(5.0))
-                                                .min_size(Vec2::new(60.0, 26.0)),
-                                            ).clicked() {
+                                                .clicked()
+                                            {
                                                 open_store = Some(game.clone());
                                             }
                                         });
