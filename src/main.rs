@@ -122,8 +122,68 @@ fn parse_acf_value(content: &str, key: &str) -> Option<String> {
     }
 }
 
+fn parse_localconfig_games(content: &str) -> HashMap<u64, u64> {
+    // Extrae appid -> playtime de localconfig.vdf
+    let mut result = HashMap::new();
+    let mut in_apps = false;
+    let mut depth = 0;
+    let mut current_appid: Option<u64> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+
+        if trimmed.contains("\"apps\"") {
+            in_apps = true;
+            continue;
+        }
+
+        if !in_apps {
+            continue;
+        }
+
+        if trimmed == "{" {
+            depth += 1;
+            continue;
+        }
+
+        if trimmed == "}" {
+            depth -= 1;
+            if depth == 0 {
+                break;
+            }
+            current_appid = None;
+            continue;
+        }
+
+        // Detectar appid (clave numérica en depth 1)
+        if depth == 1 {
+            if let Some(id) = trimmed.trim_matches('"').parse::<u64>().ok() {
+                current_appid = Some(id);
+            }
+        }
+
+        // Detectar playtime dentro del bloque del app
+        if depth == 2 {
+            if trimmed.contains("\"playtime\"") || trimmed.contains("\"Playtime\"") {
+                if let Some(appid) = current_appid {
+                    let parts: Vec<&str> = trimmed.splitn(2, "\"playtime\"").collect();
+                    if parts.len() == 2 {
+                        let val = parts[1].trim().trim_matches('"');
+                        if let Ok(pt) = val.parse::<u64>() {
+                            result.insert(appid, pt);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    result
+}
+
 fn fetch_games_local(steam_path: &str) -> Result<Vec<Game>, String> {
-    let steamapps = PathBuf::from(steam_path).join("steamapps");
+    let steam_pb = PathBuf::from(steam_path);
+    let steamapps = steam_pb.join("steamapps");
 
     if !steamapps.exists() {
         return Err(format!(
@@ -132,57 +192,144 @@ fn fetch_games_local(steam_path: &str) -> Result<Vec<Game>, String> {
         ));
     }
 
-    let mut games = Vec::new();
+    // Leer juegos instalados desde .acf
+    let mut installed: HashMap<u64, Game> = HashMap::new();
 
-    let entries = fs::read_dir(&steamapps)
-        .map_err(|e| format!("Error leyendo steamapps: {}", e))?;
+    if let Ok(entries) = fs::read_dir(&steamapps) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let filename = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .to_string();
+            if !filename.starts_with("appmanifest_") || !filename.ends_with(".acf") {
+                continue;
+            }
 
-        if !filename.starts_with("appmanifest_") || !filename.ends_with(".acf") {
-            continue;
+            let content = match fs::read_to_string(&path) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            let appid: u64 = match parse_acf_value(&content, "appid").and_then(|s| s.parse().ok()) {
+                Some(id) => id,
+                None => continue,
+            };
+
+            let name = match parse_acf_value(&content, "name") {
+                Some(n) => n,
+                None => continue,
+            };
+
+            let playtime = parse_acf_value(&content, "playtime_forever")
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0u64);
+
+            installed.insert(appid, Game { appid, name, playtime_forever: playtime });
         }
-
-        let content = match fs::read_to_string(&path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
-
-        let appid: u64 = match parse_acf_value(&content, "appid").and_then(|s| s.parse().ok()) {
-            Some(id) => id,
-            None => continue,
-        };
-
-        let name = match parse_acf_value(&content, "name") {
-            Some(n) => n,
-            None => continue,
-        };
-
-        let playtime = parse_acf_value(&content, "playtime_forever")
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0u64);
-
-        games.push(Game {
-            appid,
-            name,
-            playtime_forever: playtime,
-        });
     }
+
+    // Leer TODOS los juegos desde localconfig.vdf
+    let userdata = steam_pb.join("userdata");
+    let mut all_games: HashMap<u64, Game> = installed.clone();
+
+    if let Ok(users) = fs::read_dir(&userdata) {
+        for user_entry in users.flatten() {
+            let localconfig = user_entry.path().join("config").join("localconfig.vdf");
+            if !localconfig.exists() {
+                continue;
+            }
+
+            let content = match fs::read_to_string(&localconfig) {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+
+            // Extraer bloques de apps con nombre y playtime
+            let mut i = 0;
+            let lines: Vec<&str> = content.lines().collect();
+            let mut in_software = false;
+            let mut in_valve = false;
+            let mut in_steam = false;
+            let mut in_apps = false;
+            let mut depth_apps = 0;
+            let mut cur_appid: Option<u64> = None;
+            let mut cur_name: Option<String> = None;
+            let mut cur_playtime: u64 = 0;
+
+            while i < lines.len() {
+                let trimmed = lines[i].trim();
+
+                if trimmed.to_lowercase().contains("\"software\"") { in_software = true; }
+                if in_software && trimmed.to_lowercase().contains("\"valve\"") { in_valve = true; }
+                if in_valve && trimmed.to_lowercase().contains("\"steam\"") { in_steam = true; }
+                if in_steam && trimmed.to_lowercase().contains("\"apps\"") {
+                    in_apps = true;
+                    i += 1;
+                    continue;
+                }
+
+                if !in_apps { i += 1; continue; }
+
+                if trimmed == "{" {
+                    depth_apps += 1;
+                } else if trimmed == "}" {
+                    if depth_apps == 2 {
+                        // Fin de un bloque de app
+                        if let Some(appid) = cur_appid {
+                            if !all_games.contains_key(&appid) {
+                                if let Some(name) = cur_name.clone() {
+                                    all_games.insert(appid, Game {
+                                        appid,
+                                        name,
+                                        playtime_forever: cur_playtime,
+                                    });
+                                }
+                            }
+                        }
+                        cur_appid = None;
+                        cur_name = None;
+                        cur_playtime = 0;
+                    }
+                    depth_apps -= 1;
+                    if depth_apps == 0 { break; }
+                } else if depth_apps == 1 {
+                    // Línea con el appid como clave
+                    if let Ok(id) = trimmed.trim_matches('"').parse::<u64>() {
+                        cur_appid = Some(id);
+                    }
+                } else if depth_apps == 2 {
+                    if trimmed.to_lowercase().starts_with("\"lastplayed\"") {
+                        let val = trimmed.splitn(2, '\t').last()
+                            .or_else(|| trimmed.splitn(2, ' ').last())
+                            .unwrap_or("0")
+                            .trim()
+                            .trim_matches('"');
+                        cur_playtime = val.parse().unwrap_or(0);
+                    }
+                }
+
+                i += 1;
+            }
+        }
+    }
+
+    // Si no encontramos nada en localconfig, usar solo instalados
+    let mut games: Vec<Game> = if all_games.is_empty() {
+        installed.into_values().collect()
+    } else {
+        all_games.into_values().collect()
+    };
 
     if games.is_empty() {
-        return Err(format!(
-            "No se encontraron juegos instalados en:\n{}\n\nAsegurate de tener juegos instalados.",
-            steamapps.display()
-        ));
+        return Err("No se encontraron juegos. Asegurate de tener Steam con juegos en tu cuenta.".to_string());
     }
 
-    games.sort_by(|a, b| b.playtime_forever.cmp(&a.playtime_forever));
+    // Instalados primero, luego por tiempo jugado
+    games.sort_by(|a, b| {
+        let a_inst = installed.contains_key(&a.appid);
+        let b_inst = installed.contains_key(&b.appid);
+        b_inst.cmp(&a_inst).then(b.playtime_forever.cmp(&a.playtime_forever))
+    });
+
     Ok(games)
 }
 
