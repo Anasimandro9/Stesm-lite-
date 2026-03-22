@@ -313,6 +313,8 @@ fn fetch_games_local(steam_path: &str) -> Result<Vec<Game>, String> {
     }
 
     // Si no encontramos nada en localconfig, usar solo instalados
+    let installed_ids: std::collections::HashSet<u64> = installed.keys().cloned().collect();
+
     let mut games: Vec<Game> = if all_games.is_empty() {
         installed.into_values().collect()
     } else {
@@ -325,8 +327,8 @@ fn fetch_games_local(steam_path: &str) -> Result<Vec<Game>, String> {
 
     // Instalados primero, luego por tiempo jugado
     games.sort_by(|a, b| {
-        let a_inst = installed.contains_key(&a.appid);
-        let b_inst = installed.contains_key(&b.appid);
+        let a_inst = installed_ids.contains(&a.appid);
+        let b_inst = installed_ids.contains(&b.appid);
         b_inst.cmp(&a_inst).then(b.playtime_forever.cmp(&a.playtime_forever))
     });
 
