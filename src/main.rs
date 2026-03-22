@@ -786,29 +786,41 @@ impl App {
                     ui.vertical(|ui| {
                         ui.set_max_width(500.0);
 
-                        self.settings_box(ui, "SteamCMD — Descarga directa de juegos", |ui, s| {
-                            s.field(ui, "Usuario", &mut s.sc_user.clone(), false, |v| { s.sc_user = v; });
+                        // SteamCMD
+                        egui::Frame::none().fill(C_PANEL).rounding(Rounding::same(7.0)).inner_margin(egui::Margin::same(16.0)).stroke(Stroke::new(1.0, C_BORDER)).show(ui, |ui| {
+                            ui.set_max_width(500.0);
+                            ui.label(RichText::new("SteamCMD — Descarga directa de juegos").font(FontId::proportional(12.5)).color(C_TEXT).strong());
+                            ui.add_space(10.0);
+                            ui.label(RichText::new("Usuario").font(FontId::proportional(11.5)).color(C_TEXT_DIM));
+                            ui.add_space(3.0);
+                            ui.add(egui::TextEdit::singleline(&mut self.sc_user).desired_width(280.0).text_color(C_TEXT));
                             ui.add_space(8.0);
-                            s.field_pw(ui, "Contraseña", &mut s.sc_pass.clone(), |v| { s.sc_pass = v; });
+                            ui.label(RichText::new("Contraseña").font(FontId::proportional(11.5)).color(C_TEXT_DIM));
+                            ui.add_space(3.0);
+                            ui.add(egui::TextEdit::singleline(&mut self.sc_pass).desired_width(280.0).password(true).text_color(C_TEXT));
                             ui.add_space(8.0);
-                            s.field(ui, "Steam Guard (opcional)", &mut s.sc_guard.clone(), false, |v| { s.sc_guard = v; });
+                            ui.label(RichText::new("Steam Guard (opcional)").font(FontId::proportional(11.5)).color(C_TEXT_DIM));
+                            ui.add_space(3.0);
+                            ui.add(egui::TextEdit::singleline(&mut self.sc_guard).desired_width(200.0).hint_text("Déjalo vacío").text_color(C_TEXT));
                         });
 
                         ui.add_space(10.0);
 
-                        self.settings_box(ui, "Acciones", |ui, s| {
+                        // Acciones
+                        egui::Frame::none().fill(C_PANEL).rounding(Rounding::same(7.0)).inner_margin(egui::Margin::same(16.0)).stroke(Stroke::new(1.0, C_BORDER)).show(ui, |ui| {
+                            ui.set_max_width(500.0);
+                            ui.label(RichText::new("Acciones").font(FontId::proportional(12.5)).color(C_TEXT).strong());
+                            ui.add_space(10.0);
                             ui.horizontal(|ui| {
-                                if ui.add(egui::Button::new(RichText::new("↺  Recargar").font(FontId::proportional(12.0)).color(C_TEXT)).fill(Color32::from_rgb(26, 36, 52)).rounding(Rounding::same(4.0)).min_size(Vec2::new(110.0, 28.0))).clicked() { s.reload(); }
+                                if ui.add(egui::Button::new(RichText::new("↺  Recargar").font(FontId::proportional(12.0)).color(C_TEXT)).fill(Color32::from_rgb(26, 36, 52)).rounding(Rounding::same(4.0)).min_size(Vec2::new(110.0, 28.0))).clicked() { self.reload(); }
                                 ui.add_space(6.0);
+                                let steam_exe = self.config.as_ref().map(|c| PathBuf::from(&c.steam_path).join("steam.exe")).unwrap_or_default();
                                 if ui.add(egui::Button::new(RichText::new("Abrir Steam mínimo").font(FontId::proportional(12.0)).color(C_TEXT)).fill(Color32::from_rgb(26, 36, 52)).rounding(Rounding::same(4.0)).min_size(Vec2::new(140.0, 28.0))).clicked() {
-                                    if let Some(cfg) = &s.config {
-                                        let exe = PathBuf::from(&cfg.steam_path).join("steam.exe");
-                                        Command::new(&exe).args(["-no-browser", "-silent"]).spawn().ok();
-                                    }
+                                    Command::new(&steam_exe).args(["-no-browser", "-silent"]).spawn().ok();
                                 }
                             });
                             ui.add_space(8.0);
-                            if let Some(cfg) = &s.config {
+                            if let Some(cfg) = &self.config {
                                 ui.label(RichText::new(format!("Steam: {}", cfg.steam_path)).font(FontId::proportional(10.5)).color(C_TEXT_FAINT));
                             }
                         });
@@ -827,27 +839,6 @@ impl App {
                 });
             });
         });
-    }
-
-    fn settings_box(&mut self, ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui, &mut App)) {
-        egui::Frame::none().fill(C_PANEL).rounding(Rounding::same(7.0)).inner_margin(egui::Margin::same(16.0)).stroke(Stroke::new(1.0, C_BORDER)).show(ui, |ui| {
-            ui.set_max_width(500.0);
-            ui.label(RichText::new(title).font(FontId::proportional(12.5)).color(C_TEXT).strong());
-            ui.add_space(10.0);
-            content(ui, self);
-        });
-    }
-
-    fn field(&self, ui: &mut egui::Ui, label: &str, val: &mut String, _pw: bool, _cb: impl Fn(String)) {
-        ui.label(RichText::new(label).font(FontId::proportional(11.5)).color(C_TEXT_DIM));
-        ui.add_space(3.0);
-        ui.add(egui::TextEdit::singleline(val).desired_width(280.0).text_color(C_TEXT));
-    }
-
-    fn field_pw(&self, ui: &mut egui::Ui, label: &str, val: &mut String, _cb: impl Fn(String)) {
-        ui.label(RichText::new(label).font(FontId::proportional(11.5)).color(C_TEXT_DIM));
-        ui.add_space(3.0);
-        ui.add(egui::TextEdit::singleline(val).desired_width(280.0).password(true).text_color(C_TEXT));
     }
 
     fn login_popup(&mut self, ctx: &egui::Context) {
