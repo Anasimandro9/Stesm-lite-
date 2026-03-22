@@ -957,7 +957,7 @@ impl eframe::App for SteamLite {
         style.visuals.panel_fill = C_BG;
         style.visuals.window_fill = C_PANEL;
         style.visuals.window_rounding = Rounding::same(8.0);
-        style.visuals.window_shadow = egui::epaint::Shadow { blur: 20, spread: 0, offset: [0, 4].into(), color: Color32::from_black_alpha(80) };
+        style.visuals.window_shadow = egui::epaint::Shadow { blur: 20.0, spread: 0.0, offset: [0.0, 4.0].into(), color: Color32::from_black_alpha(80) };
         style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(26, 33, 46);
         style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(35, 46, 65);
         style.visuals.widgets.active.bg_fill = Color32::from_rgb(42, 56, 80);
