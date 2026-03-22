@@ -11,7 +11,6 @@ use std::thread;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Config {
-    api_key: String,
     steam_id: String,
 }
 
@@ -39,7 +38,7 @@ fn delete_config() {
 
 // ===================== GAME =====================
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 struct Game {
     appid: u64,
     name: String,
@@ -67,32 +66,107 @@ impl Game {
     }
 }
 
-// ===================== API =====================
+// ===================== API SIN KEY (XML publico) =====================
 
-#[derive(Deserialize)]
-struct GamesResponse {
-    response: GamesResponseInner,
-}
-
-#[derive(Deserialize)]
-struct GamesResponseInner {
-    games: Option<Vec<Game>>,
-}
-
-fn fetch_games(api_key: &str, steam_id: &str) -> Result<Vec<Game>, String> {
+fn fetch_games_public(steam_id: &str) -> Result<Vec<Game>, String> {
     let url = format!(
-        "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/?key={}&steamid={}&include_appinfo=true&include_played_free_games=true",
-        api_key, steam_id
+        "https://steamcommunity.com/profiles/{}/games?xml=1",
+        steam_id
     );
-    let resp = reqwest::blocking::get(&url).map_err(|e| e.to_string())?;
-    let data: GamesResponse = resp.json().map_err(|e| e.to_string())?;
-    let mut games = data.response.games.unwrap_or_default();
+
+    let resp = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0")
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?
+        .get(&url)
+        .send()
+        .map_err(|e| format!("No se pudo conectar: {}", e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Error HTTP: {}", resp.status()));
+    }
+
+    let body = resp.text().map_err(|e| e.to_string())?;
+
+    // Comprobar si el perfil es privado
+    if body.contains("This profile is private") || body.contains("perfil es privado") {
+        return Err("Tu perfil de Steam es privado. Ve a Steam -> Configuracion -> Privacidad -> Detalles del juego -> Publico".to_string());
+    }
+
+    // Parsear XML manualmente (sin dependencia extra)
+    let mut games = Vec::new();
+
+    for game_block in body.split("<game>") {
+        if !game_block.contains("</game>") {
+            continue;
+        }
+
+        let appid = extract_xml_u64(game_block, "appID");
+        let name = extract_xml_str(game_block, "name");
+        let playtime = extract_xml_u64(game_block, "hoursOnRecord")
+            .map(|h| h * 60)
+            .or_else(|| extract_xml_f64(game_block, "hoursOnRecord").map(|h| (h * 60.0) as u64))
+            .unwrap_or(0);
+
+        if let (Some(appid), Some(name)) = (appid, name) {
+            games.push(Game {
+                appid,
+                name,
+                playtime_forever: playtime,
+            });
+        }
+    }
+
+    if games.is_empty() {
+        return Err("No se encontraron juegos. Asegurate de que tu perfil sea publico y tenga juegos.".to_string());
+    }
+
     games.sort_by(|a, b| b.playtime_forever.cmp(&a.playtime_forever));
     Ok(games)
 }
 
+fn extract_xml_str(block: &str, tag: &str) -> Option<String> {
+    let open = format!("<{}>", tag);
+    let close = format!("</{}>", tag);
+    let start = block.find(&open)? + open.len();
+    let end = block[start..].find(&close)? + start;
+    let raw = &block[start..end];
+    // Decodificar CDATA si existe
+    let cleaned = if raw.starts_with("<![CDATA[") && raw.ends_with("]]>") {
+        raw[9..raw.len() - 3].to_string()
+    } else {
+        raw.replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&apos;", "'")
+            .replace("&quot;", "\"")
+    };
+    Some(cleaned)
+}
+
+fn extract_xml_u64(block: &str, tag: &str) -> Option<u64> {
+    extract_xml_str(block, tag)?.trim().parse().ok()
+}
+
+fn extract_xml_f64(block: &str, tag: &str) -> Option<f64> {
+    extract_xml_str(block, tag)?
+        .trim()
+        .replace(",", ".")
+        .parse()
+        .ok()
+}
+
 fn fetch_image(url: &str) -> Option<Vec<u8>> {
-    let resp = reqwest::blocking::get(url).ok()?;
+    let resp = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0")
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .ok()?
+        .get(url)
+        .send()
+        .ok()?;
+
     if resp.status().is_success() {
         resp.bytes().ok().map(|b| b.to_vec())
     } else {
@@ -115,9 +189,7 @@ struct SteamLite {
     config: Option<Config>,
 
     // Setup
-    input_api_key: String,
     input_steam_id: String,
-    show_api_key: bool,
     setup_error: String,
 
     // Library
@@ -126,9 +198,8 @@ struct SteamLite {
     load_error: Arc<Mutex<String>>,
     search: String,
 
-    // Image cache: appid -> TextureHandle
+    // Texturas
     textures: HashMap<u64, egui::TextureHandle>,
-    // Images being fetched
     pending_images: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
     fetching: Arc<Mutex<std::collections::HashSet<u64>>>,
 
@@ -144,12 +215,10 @@ impl SteamLite {
             Screen::Setup
         };
 
-        let app = Self {
+        Self {
             screen,
             config,
-            input_api_key: String::new(),
             input_steam_id: String::new(),
-            show_api_key: false,
             setup_error: String::new(),
             games: Arc::new(Mutex::new(vec![])),
             loading_games: Arc::new(Mutex::new(false)),
@@ -159,9 +228,7 @@ impl SteamLite {
             pending_images: Arc::new(Mutex::new(vec![])),
             fetching: Arc::new(Mutex::new(std::collections::HashSet::new())),
             last_launched: None,
-        };
-
-        app
+        }
     }
 
     fn start_loading_games(&self) {
@@ -178,9 +245,9 @@ impl SteamLite {
         *error.lock().unwrap() = String::new();
 
         thread::spawn(move || {
-            match fetch_games(&cfg.api_key, &cfg.steam_id) {
+            match fetch_games_public(&cfg.steam_id) {
                 Ok(g) => *games.lock().unwrap() = g,
-                Err(e) => *error.lock().unwrap() = format!("Error al cargar juegos: {}", e),
+                Err(e) => *error.lock().unwrap() = e,
             }
             *loading.lock().unwrap() = false;
         });
@@ -195,28 +262,19 @@ impl SteamLite {
         drop(fetching);
 
         let pending = Arc::clone(&self.pending_images);
-        let fetching = Arc::clone(&self.fetching);
+        let fetching_arc = Arc::clone(&self.fetching);
 
         thread::spawn(move || {
             if let Some(bytes) = fetch_image(&url) {
                 pending.lock().unwrap().push((appid, bytes));
             }
-            fetching.lock().unwrap().remove(&appid);
+            fetching_arc.lock().unwrap().remove(&appid);
         });
     }
 
     fn validate_and_save(&mut self) {
-        let api_key = self.input_api_key.trim().to_string();
         let steam_id = self.input_steam_id.trim().to_string();
 
-        if api_key.is_empty() {
-            self.setup_error = "Necesitas la API Key".to_string();
-            return;
-        }
-        if api_key.len() < 20 {
-            self.setup_error = "La API Key parece incorrecta (muy corta)".to_string();
-            return;
-        }
         if steam_id.is_empty() {
             self.setup_error = "Necesitas el Steam ID".to_string();
             return;
@@ -230,7 +288,7 @@ impl SteamLite {
             return;
         }
 
-        let config = Config { api_key, steam_id };
+        let config = Config { steam_id };
         save_config(&config);
         self.config = Some(config);
         self.setup_error = String::new();
@@ -246,7 +304,7 @@ impl SteamLite {
         egui::CentralPanel::default()
             .frame(egui::Frame::none().fill(Color32::from_rgb(12, 15, 22)))
             .show(ctx, |ui| {
-                ui.add_space(50.0);
+                ui.add_space(60.0);
                 ui.vertical_centered(|ui| {
                     ui.label(RichText::new("🎮").font(FontId::proportional(64.0)));
                     ui.add_space(8.0);
@@ -287,42 +345,6 @@ impl SteamLite {
                             ui.add_space(24.0);
 
                             ui.label(
-                                RichText::new("Steam API Key")
-                                    .font(FontId::proportional(14.0))
-                                    .color(Color32::from_rgb(180, 200, 230))
-                                    .strong(),
-                            );
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.input_api_key)
-                                        .desired_width(360.0)
-                                        .hint_text("Ej: A1B2C3D4E5F6G7H8I9J0...")
-                                        .password(!self.show_api_key),
-                                );
-                                let eye = if self.show_api_key { "Ocultar" } else { "Mostrar" };
-                                if ui.small_button(eye).clicked() {
-                                    self.show_api_key = !self.show_api_key;
-                                }
-                            });
-                            ui.add_space(4.0);
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    RichText::new("Obtenela en: ")
-                                        .font(FontId::proportional(12.0))
-                                        .color(Color32::from_rgb(100, 120, 150)),
-                                );
-                                ui.hyperlink_to(
-                                    RichText::new("steamcommunity.com/dev/apikey")
-                                        .font(FontId::proportional(12.0))
-                                        .color(Color32::from_rgb(80, 160, 240)),
-                                    "https://steamcommunity.com/dev/apikey",
-                                );
-                            });
-
-                            ui.add_space(20.0);
-
-                            ui.label(
                                 RichText::new("Steam ID (64-bit)")
                                     .font(FontId::proportional(14.0))
                                     .color(Color32::from_rgb(180, 200, 230))
@@ -332,7 +354,7 @@ impl SteamLite {
                             ui.add(
                                 egui::TextEdit::singleline(&mut self.input_steam_id)
                                     .desired_width(420.0)
-                                    .hint_text("Ej: 76561198XXXXXXXXX (17 digitos)"),
+                                    .hint_text("Ej: 76561199528188579 (17 digitos)"),
                             );
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
@@ -349,7 +371,23 @@ impl SteamLite {
                                 );
                             });
 
-                            ui.add_space(24.0);
+                            ui.add_space(12.0);
+
+                            // Info sin API key
+                            egui::Frame::none()
+                                .fill(Color32::from_rgb(15, 30, 45))
+                                .rounding(Rounding::same(6.0))
+                                .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+                                .stroke(Stroke::new(1.0, Color32::from_rgb(30, 70, 110)))
+                                .show(ui, |ui| {
+                                    ui.label(
+                                        RichText::new("No necesitas API Key. Solo tu Steam ID y perfil publico.")
+                                            .font(FontId::proportional(12.0))
+                                            .color(Color32::from_rgb(100, 180, 240)),
+                                    );
+                                });
+
+                            ui.add_space(20.0);
 
                             if !self.setup_error.is_empty() {
                                 egui::Frame::none()
@@ -449,14 +487,12 @@ impl SteamLite {
 
                     ui.add_space(20.0);
 
-                    // Buscador
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search)
                             .desired_width(250.0)
                             .hint_text("Buscar juego..."),
                     );
 
-                    // Contador
                     let count = self.games.lock().unwrap().len();
                     let loading = *self.loading_games.lock().unwrap();
                     ui.add_space(10.0);
@@ -478,12 +514,10 @@ impl SteamLite {
                         if ui.small_button("Cerrar sesion").clicked() {
                             delete_config();
                             self.config = None;
-                            self.input_api_key = String::new();
                             self.input_steam_id = String::new();
                             self.screen = Screen::Setup;
                             *self.games.lock().unwrap() = vec![];
                         }
-
                         if let Some(name) = &self.last_launched {
                             ui.label(
                                 RichText::new(format!("Jugando: {}", name))
@@ -514,7 +548,7 @@ impl SteamLite {
                 });
         }
 
-        // Library grid
+        // Grid
         let games_snap: Vec<Game> = {
             let games = self.games.lock().unwrap();
             let q = self.search.to_lowercase();
@@ -525,7 +559,6 @@ impl SteamLite {
                 .collect()
         };
 
-        // Request images for visible games (first 30)
         for game in games_snap.iter().take(30) {
             if !self.textures.contains_key(&game.appid) {
                 self.request_image(game.appid, game.image_url());
@@ -553,7 +586,7 @@ impl SteamLite {
                     ui.add_space(12.0);
 
                     let card_w = 220.0_f32;
-                    let card_h = 160.0_f32; // image area
+                    let card_h = 103.0_f32;
                     let spacing = 12.0_f32;
                     let available = ui.available_width() - 24.0;
                     let cols = ((available + spacing) / (card_w + spacing)).floor().max(1.0) as usize;
@@ -575,18 +608,16 @@ impl SteamLite {
                                     .show(ui, |ui| {
                                         ui.set_max_width(card_w);
 
-                                        // Imagen o placeholder
                                         if let Some(tex) = self.textures.get(&game.appid) {
-                                            let img = egui::Image::new(tex)
-                                                .max_width(card_w)
-                                                .max_height(card_h)
-                                                .rounding(Rounding {
-                                                    nw: 10.0,
-                                                    ne: 10.0,
-                                                    sw: 0.0,
-                                                    se: 0.0,
-                                                });
-                                            ui.add(img);
+                                            ui.add(
+                                                egui::Image::new(tex)
+                                                    .max_width(card_w)
+                                                    .max_height(card_h)
+                                                    .rounding(Rounding {
+                                                        nw: 10.0, ne: 10.0,
+                                                        sw: 0.0, se: 0.0,
+                                                    }),
+                                            );
                                         } else {
                                             let (rect, _) = ui.allocate_exact_size(
                                                 Vec2::new(card_w, card_h),
@@ -597,7 +628,6 @@ impl SteamLite {
                                                 Rounding { nw: 10.0, ne: 10.0, sw: 0.0, se: 0.0 },
                                                 Color32::from_rgb(25, 32, 45),
                                             );
-                                            // Nombre como placeholder
                                             ui.painter().text(
                                                 rect.center(),
                                                 egui::Align2::CENTER_CENTER,
@@ -609,7 +639,6 @@ impl SteamLite {
 
                                         ui.add_space(6.0);
 
-                                        // Nombre
                                         ui.horizontal(|ui| {
                                             ui.add_space(8.0);
                                             ui.label(
@@ -620,11 +649,12 @@ impl SteamLite {
                                             );
                                         });
 
-                                        // Horas
                                         ui.horizontal(|ui| {
                                             ui.add_space(8.0);
                                             let hours = game.playtime_hours();
-                                            let label = if hours < 1.0 {
+                                            let label = if game.playtime_forever == 0 {
+                                                "Sin jugar".to_string()
+                                            } else if hours < 1.0 {
                                                 format!("{} min jugados", game.playtime_forever)
                                             } else {
                                                 format!("{:.0}h jugadas", hours)
@@ -638,11 +668,10 @@ impl SteamLite {
 
                                         ui.add_space(8.0);
 
-                                        // Botones
                                         ui.horizontal(|ui| {
                                             ui.add_space(8.0);
 
-                                            let play = ui.add(
+                                            if ui.add(
                                                 egui::Button::new(
                                                     RichText::new("JUGAR")
                                                         .font(FontId::proportional(12.0))
@@ -652,15 +681,13 @@ impl SteamLite {
                                                 .fill(Color32::from_rgb(30, 110, 200))
                                                 .rounding(Rounding::same(5.0))
                                                 .min_size(Vec2::new(90.0, 26.0)),
-                                            );
-
-                                            if play.clicked() {
+                                            ).clicked() {
                                                 launch = Some(game.clone());
                                             }
 
                                             ui.add_space(4.0);
 
-                                            let store = ui.add(
+                                            if ui.add(
                                                 egui::Button::new(
                                                     RichText::new("Tienda")
                                                         .font(FontId::proportional(11.0))
@@ -669,9 +696,7 @@ impl SteamLite {
                                                 .fill(Color32::from_rgb(28, 36, 52))
                                                 .rounding(Rounding::same(5.0))
                                                 .min_size(Vec2::new(60.0, 26.0)),
-                                            );
-
-                                            if store.clicked() {
+                                            ).clicked() {
                                                 open_store = Some(game.clone());
                                             }
                                         });
@@ -685,7 +710,6 @@ impl SteamLite {
                 });
             });
 
-        // Ejecutar acciones fuera del borrow
         if let Some(game) = launch {
             open::that(game.launch_url()).ok();
             self.last_launched = Some(game.name);
@@ -695,7 +719,6 @@ impl SteamLite {
             open::that(game.store_url()).ok();
         }
 
-        // Repintar si hay imagenes pendientes o cargando
         if !self.pending_images.lock().unwrap().is_empty()
             || *self.loading_games.lock().unwrap()
         {
@@ -716,7 +739,6 @@ impl eframe::App for SteamLite {
         style.visuals.widgets.active.rounding = Rounding::same(6.0);
         ctx.set_style(style);
 
-        // Autocargar si entramos directo sin pasar por setup
         {
             let games = self.games.lock().unwrap();
             let loading = *self.loading_games.lock().unwrap();
