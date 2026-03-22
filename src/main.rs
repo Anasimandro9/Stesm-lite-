@@ -10,26 +10,28 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-// ===================== PALETA "STEAM REFINED" =====================
-const C_BG:           Color32 = Color32::from_rgb(16, 18, 24);      // Fondo principal
-const C_SIDEBAR:      Color32 = Color32::from_rgb(11, 13, 18);      // Sidebar
-const C_PANEL:        Color32 = Color32::from_rgb(20, 24, 32);      // Panels secundarios
-const C_CARD:         Color32 = Color32::from_rgb(24, 29, 40);      // Cards
-const C_CARD_HOVER:   Color32 = Color32::from_rgb(30, 38, 52);      // Card hover
-const C_TOPBAR:       Color32 = Color32::from_rgb(13, 15, 21);      // Barra superior
-const C_BORDER:       Color32 = Color32::from_rgb(38, 48, 65);      // Bordes sutiles
-const C_BORDER_LIT:   Color32 = Color32::from_rgb(55, 75, 105);     // Bordes activos
-const C_ACCENT:       Color32 = Color32::from_rgb(102, 192, 244);   // Azul Steam
-const C_ACCENT_DIM:   Color32 = Color32::from_rgb(60, 130, 180);    // Azul atenuado
-const C_GREEN:        Color32 = Color32::from_rgb(74, 197, 90);     // Verde instalado
-const C_GREEN_DIM:    Color32 = Color32::from_rgb(45, 130, 55);     // Verde botón
-const C_TEXT:         Color32 = Color32::from_rgb(195, 208, 220);   // Texto principal
-const C_TEXT_DIM:     Color32 = Color32::from_rgb(110, 130, 155);   // Texto secundario
-const C_TEXT_FAINT:   Color32 = Color32::from_rgb(65, 80, 100);     // Texto muy tenue
-const C_BTN:          Color32 = Color32::from_rgb(55, 125, 170);    // Botón primario
-const C_BTN_HOVER:    Color32 = Color32::from_rgb(70, 150, 200);    // Botón hover
-const C_BTN_GREEN:    Color32 = Color32::from_rgb(50, 145, 60);     // Botón instalar
-const C_RED:          Color32 = Color32::from_rgb(200, 70, 70);     // Error/peligro
+// ===================== PALETA =====================
+const C_BG:         Color32 = Color32::from_rgb(16, 18, 24);
+const C_SIDEBAR:    Color32 = Color32::from_rgb(11, 13, 18);
+const C_PANEL:      Color32 = Color32::from_rgb(20, 24, 32);
+const C_CARD:       Color32 = Color32::from_rgb(24, 29, 40);
+const C_TOPBAR:     Color32 = Color32::from_rgb(13, 15, 21);
+const C_BORDER:     Color32 = Color32::from_rgb(38, 48, 65);
+const C_BORDER_LIT: Color32 = Color32::from_rgb(55, 75, 105);
+const C_ACCENT:     Color32 = Color32::from_rgb(102, 192, 244);
+const C_GREEN:      Color32 = Color32::from_rgb(74, 197, 90);
+const C_TEXT:       Color32 = Color32::from_rgb(195, 208, 220);
+const C_TEXT_DIM:   Color32 = Color32::from_rgb(110, 130, 155);
+const C_TEXT_FAINT: Color32 = Color32::from_rgb(65, 80, 100);
+const C_BTN:        Color32 = Color32::from_rgb(55, 125, 170);
+const C_BTN_GREEN:  Color32 = Color32::from_rgb(50, 145, 60);
+const C_RED:        Color32 = Color32::from_rgb(200, 70, 70);
+
+// Dimensiones fijas de cards — TODAS IGUALES
+const CARD_W: f32 = 200.0;
+const CARD_IMG_H: f32 = 94.0; // 460x215 ratio ~ 0.467
+const CARD_INFO_H: f32 = 70.0;
+const CARD_H: f32 = CARD_IMG_H + CARD_INFO_H;
 
 // ===================== CONFIG =====================
 
@@ -37,12 +39,16 @@ const C_RED:          Color32 = Color32::from_rgb(200, 70, 70);     // Error/pel
 struct Config {
     steam_path: String,
     steam_user: Option<String>,
-    api_key: Option<String>,
 }
 
 fn config_path() -> PathBuf {
     let mut p = std::env::current_exe().unwrap_or_default();
     p.pop(); p.push("steamlite_config.json"); p
+}
+
+fn names_cache_path() -> PathBuf {
+    let mut p = std::env::current_exe().unwrap_or_default();
+    p.pop(); p.push("steamlite_names.json"); p
 }
 
 fn load_config() -> Option<Config> {
@@ -53,7 +59,20 @@ fn save_config(c: &Config) {
     if let Ok(j) = serde_json::to_string_pretty(c) { fs::write(config_path(), j).ok(); }
 }
 
-fn delete_config() { fs::remove_file(config_path()).ok(); }
+fn delete_config() {
+    fs::remove_file(config_path()).ok();
+    fs::remove_file(names_cache_path()).ok();
+}
+
+fn load_names_cache() -> HashMap<u64, String> {
+    fs::read_to_string(names_cache_path()).ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+fn save_names_cache(names: &HashMap<u64, String>) {
+    if let Ok(j) = serde_json::to_string(names) { fs::write(names_cache_path(), j).ok(); }
+}
 
 // ===================== STRUCTS =====================
 
@@ -70,19 +89,26 @@ impl Game {
         let h = self.playtime_forever as f32 / 60.0;
         if self.playtime_forever == 0 { "Sin jugar".into() }
         else if h < 1.0 { format!("{} min", self.playtime_forever) }
-        else { format!("{:.1}h", h) }
+        else { format!("{:.1}h jugadas", h) }
     }
-    fn img_url(&self) -> String { format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg", self.appid) }
+    fn img_url(&self) -> String {
+        format!("https://cdn.cloudflare.steamstatic.com/steam/apps/{}/header.jpg", self.appid)
+    }
     fn launch_url(&self) -> String { format!("steam://run/{}", self.appid) }
     fn store_url(&self) -> String { format!("https://store.steampowered.com/app/{}", self.appid) }
+    fn has_real_name(&self) -> bool { !self.name.starts_with("App ") }
 }
 
 #[derive(Debug, Clone)]
 struct Friend { name: String, state: u8, game: Option<String> }
 
 impl Friend {
-    fn status_label(&self) -> &str { match self.state { 1 => "En línea", 2 => "Ocupado", 3 => "Ausente", _ => "Desconectado" } }
-    fn state_color(&self) -> Color32 { match self.state { 1 => C_GREEN, 2 => Color32::from_rgb(200,80,80), 3 => Color32::from_rgb(200,160,40), _ => C_TEXT_FAINT } }
+    fn status_label(&self) -> &str {
+        match self.state { 1 => "En línea", 2 => "Ocupado", 3 => "Ausente", _ => "Desconectado" }
+    }
+    fn state_color(&self) -> Color32 {
+        match self.state { 1 => C_GREEN, 2 => Color32::from_rgb(200,80,80), 3 => Color32::from_rgb(200,160,40), _ => C_TEXT_FAINT }
+    }
 }
 
 // ===================== STEAM LOCAL =====================
@@ -110,7 +136,7 @@ fn acf_val(s: &str, k: &str) -> Option<String> {
     if after.starts_with('"') { let inner = &after[1..]; Some(inner[..inner.find('"')?].to_string()) } else { None }
 }
 
-fn load_games(path: &str) -> Result<Vec<Game>, String> {
+fn load_games(path: &str, names_cache: &HashMap<u64, String>) -> Result<Vec<Game>, String> {
     let pb = PathBuf::from(path);
     let apps = pb.join("steamapps");
     if !apps.exists() { return Err(format!("No se encontró steamapps en {}", path)); }
@@ -123,7 +149,7 @@ fn load_games(path: &str) -> Result<Vec<Game>, String> {
             if !n.starts_with("appmanifest_") || !n.ends_with(".acf") { continue; }
             let c = match fs::read_to_string(&p) { Ok(c) => c, _ => continue };
             let id: u64 = match acf_val(&c, "appid").and_then(|s| s.parse().ok()) { Some(i) => i, _ => continue };
-            let name = match acf_val(&c, "name") { Some(n) => n, _ => continue };
+            let name = acf_val(&c, "name").unwrap_or_else(|| names_cache.get(&id).cloned().unwrap_or_else(|| format!("App {}", id)));
             let pt = acf_val(&c, "playtime_forever").and_then(|s| s.parse().ok()).unwrap_or(0u64);
             installed.insert(id, Game { appid: id, name, playtime_forever: pt, installed: true });
         }
@@ -146,14 +172,18 @@ fn load_games(path: &str) -> Result<Vec<Game>, String> {
                     if depth == 2 {
                         if let Some(id) = cur_id {
                             if !all.contains_key(&id) {
-                                all.insert(id, Game { appid: id, name: format!("App {}", id), playtime_forever: cur_pt, installed: false });
+                                let name = names_cache.get(&id).cloned().unwrap_or_else(|| format!("App {}", id));
+                                all.insert(id, Game { appid: id, name, playtime_forever: cur_pt, installed: false });
                             }
                         }
                         cur_id = None; cur_pt = 0;
                     }
                     depth -= 1; if depth <= 0 { break; }
-                } else if depth == 1 { if let Ok(id) = t.trim_matches('"').parse::<u64>() { cur_id = Some(id); } }
-                else if depth == 2 && t.to_lowercase().contains("\"playtime\"") { cur_pt = t.split('"').nth(3).unwrap_or("0").parse().unwrap_or(0); }
+                } else if depth == 1 {
+                    if let Ok(id) = t.trim_matches('"').parse::<u64>() { cur_id = Some(id); }
+                } else if depth == 2 && t.to_lowercase().contains("\"playtime\"") {
+                    cur_pt = t.split('"').nth(3).unwrap_or("0").parse().unwrap_or(0);
+                }
                 i += 1;
             }
         }
@@ -198,19 +228,35 @@ fn load_friends(path: &str) -> Vec<Friend> {
     friends
 }
 
+// Obtiene nombre real desde la API pública de Steam (sin key)
+fn fetch_app_name(appid: u64) -> Option<String> {
+    let url = format!("https://store.steampowered.com/api/appdetails?appids={}&filters=basic", appid);
+    let resp = reqwest::blocking::Client::builder()
+        .user_agent("Mozilla/5.0")
+        .timeout(std::time::Duration::from_secs(8))
+        .build().ok()?.get(&url).send().ok()?;
+    let json: serde_json::Value = resp.json().ok()?;
+    json[appid.to_string()]["data"]["name"].as_str().map(|s| s.to_string())
+}
+
 fn fetch_img(url: &str) -> Option<Vec<u8>> {
     let r = reqwest::blocking::Client::builder().user_agent("Mozilla/5.0").timeout(std::time::Duration::from_secs(10)).build().ok()?.get(url).send().ok()?;
     if r.status().is_success() { r.bytes().ok().map(|b| b.to_vec()) } else { None }
 }
 
 fn find_steamcmd(steam_path: &str) -> Option<PathBuf> {
-    for p in [PathBuf::from(steam_path).join("steamcmd.exe"), PathBuf::from(r"C:\steamcmd\steamcmd.exe")] { if p.exists() { return Some(p); } }
+    for p in [PathBuf::from(steam_path).join("steamcmd.exe"), PathBuf::from(r"C:\steamcmd\steamcmd.exe")] {
+        if p.exists() { return Some(p); }
+    }
     None
 }
 
 fn download_game(steam_path: &str, user: &str, pass: &str, guard: &str, appid: u64, status: Arc<Mutex<String>>) {
     *status.lock().unwrap() = "Conectando con Steam...".into();
-    let cmd = match find_steamcmd(steam_path) { Some(p) => p, None => { open::that(format!("steam://install/{}", appid)).ok(); *status.lock().unwrap() = "Abriendo Steam para instalar...".into(); return; } };
+    let cmd = match find_steamcmd(steam_path) {
+        Some(p) => p,
+        None => { open::that(format!("steam://install/{}", appid)).ok(); *status.lock().unwrap() = "Abriendo Steam para instalar...".into(); return; }
+    };
     let dir = PathBuf::from(steam_path).join("steamapps").join("common");
     let mut args = vec!["+login".into(), user.into(), pass.into()];
     if !guard.is_empty() { args.push(guard.into()); }
@@ -231,7 +277,6 @@ fn download_game(steam_path: &str, user: &str, pass: &str, guard: &str, appid: u
 
 #[derive(PartialEq, Clone)] enum Tab { Library, Friends, Settings }
 #[derive(PartialEq)] enum Screen { Setup, Main }
-#[derive(PartialEq)] enum LibraryView { Grid, List }
 
 struct SteamLite {
     screen: Screen,
@@ -242,14 +287,15 @@ struct SteamLite {
 
     games: Arc<Mutex<Vec<Game>>>,
     friends: Arc<Mutex<Vec<Friend>>>,
+    names_cache: Arc<Mutex<HashMap<u64, String>>>,
     loading: Arc<Mutex<bool>>,
+    resolving_names: Arc<Mutex<bool>>,
     load_error: Arc<Mutex<String>>,
     dl_status: Arc<Mutex<String>>,
 
     search: String,
     tab: Tab,
-    lib_view: LibraryView,
-    selected_game: Option<u64>,
+    show_installed_only: bool,
 
     textures: HashMap<u64, egui::TextureHandle>,
     pending_imgs: Arc<Mutex<Vec<(u64, Vec<u8>)>>>,
@@ -261,7 +307,6 @@ struct SteamLite {
     steamcmd_guard: String,
     show_login: bool,
     pending_appid: Option<u64>,
-    input_api_key: String,
 }
 
 impl SteamLite {
@@ -270,25 +315,71 @@ impl SteamLite {
         let screen = if config.is_some() { Screen::Main } else { Screen::Setup };
         let auto = find_steam().unwrap_or_default();
         let user = config.as_ref().and_then(|c| c.steam_user.clone()).unwrap_or_default();
-        let api = config.as_ref().and_then(|c| c.api_key.clone()).unwrap_or_default();
+        let names_cache = Arc::new(Mutex::new(load_names_cache()));
         Self {
             screen, config, input_path: auto.clone(), setup_error: String::new(), autodetected: !auto.is_empty(),
             games: Arc::new(Mutex::new(vec![])), friends: Arc::new(Mutex::new(vec![])),
-            loading: Arc::new(Mutex::new(false)), load_error: Arc::new(Mutex::new(String::new())), dl_status: Arc::new(Mutex::new(String::new())),
-            search: String::new(), tab: Tab::Library, lib_view: LibraryView::Grid, selected_game: None,
+            names_cache,
+            loading: Arc::new(Mutex::new(false)), resolving_names: Arc::new(Mutex::new(false)),
+            load_error: Arc::new(Mutex::new(String::new())), dl_status: Arc::new(Mutex::new(String::new())),
+            search: String::new(), tab: Tab::Library, show_installed_only: false,
             textures: HashMap::new(), pending_imgs: Arc::new(Mutex::new(vec![])), fetching: Arc::new(Mutex::new(HashSet::new())), last_played: None,
-            steamcmd_user: user, steamcmd_pass: String::new(), steamcmd_guard: String::new(), show_login: false, pending_appid: None, input_api_key: api,
+            steamcmd_user: user, steamcmd_pass: String::new(), steamcmd_guard: String::new(), show_login: false, pending_appid: None,
         }
     }
 
     fn reload(&self) {
         let cfg = match &self.config { Some(c) => c.clone(), None => return };
-        let (games, friends, loading, error) = (Arc::clone(&self.games), Arc::clone(&self.friends), Arc::clone(&self.loading), Arc::clone(&self.load_error));
+        let (games, friends, loading, error, names) = (
+            Arc::clone(&self.games), Arc::clone(&self.friends),
+            Arc::clone(&self.loading), Arc::clone(&self.load_error),
+            Arc::clone(&self.names_cache),
+        );
         *loading.lock().unwrap() = true; *error.lock().unwrap() = String::new();
         thread::spawn(move || {
-            match load_games(&cfg.steam_path) { Ok(g) => *games.lock().unwrap() = g, Err(e) => *error.lock().unwrap() = e }
+            let cache = names.lock().unwrap().clone();
+            match load_games(&cfg.steam_path, &cache) { Ok(g) => *games.lock().unwrap() = g, Err(e) => *error.lock().unwrap() = e }
             *friends.lock().unwrap() = load_friends(&cfg.steam_path);
             *loading.lock().unwrap() = false;
+        });
+    }
+
+    fn resolve_names(&self) {
+        let games_arc = Arc::clone(&self.games);
+        let names_arc = Arc::clone(&self.names_cache);
+        let resolving = Arc::clone(&self.resolving_names);
+
+        if *resolving.lock().unwrap() { return; }
+        *resolving.lock().unwrap() = true;
+
+        thread::spawn(move || {
+            // Obtener IDs sin nombre real
+            let ids_to_resolve: Vec<u64> = {
+                let gs = games_arc.lock().unwrap();
+                let cache = names_arc.lock().unwrap();
+                gs.iter().filter(|g| !g.has_real_name() && !cache.contains_key(&g.appid)).map(|g| g.appid).take(15).collect()
+            };
+
+            let mut updated = false;
+            for appid in ids_to_resolve {
+                if let Some(name) = fetch_app_name(appid) {
+                    let mut cache = names_arc.lock().unwrap();
+                    cache.insert(appid, name.clone());
+                    drop(cache);
+                    // Actualizar nombre en games
+                    let mut gs = games_arc.lock().unwrap();
+                    if let Some(g) = gs.iter_mut().find(|g| g.appid == appid) { g.name = name; }
+                    updated = true;
+                }
+                thread::sleep(std::time::Duration::from_millis(300)); // respetar rate limit
+            }
+
+            if updated {
+                let cache = names_arc.lock().unwrap().clone();
+                save_names_cache(&cache);
+            }
+
+            *resolving.lock().unwrap() = false;
         });
     }
 
@@ -303,7 +394,7 @@ impl SteamLite {
         let path = self.input_path.trim().to_string();
         if path.is_empty() { self.setup_error = "Introduce la ruta de Steam".into(); return; }
         if !PathBuf::from(&path).join("steamapps").exists() { self.setup_error = "No se encontró steamapps en esa ruta".into(); return; }
-        let cfg = Config { steam_path: path, steam_user: None, api_key: None };
+        let cfg = Config { steam_path: path, steam_user: None };
         save_config(&cfg); self.config = Some(cfg); self.setup_error = String::new(); self.screen = Screen::Main; self.reload();
     }
 
@@ -322,30 +413,28 @@ impl SteamLite {
 impl SteamLite {
     fn show_setup(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().frame(egui::Frame::none().fill(C_BG)).show(ctx, |ui| {
-            // Fondo con efecto sutil
             let rect = ui.max_rect();
-            ui.painter().rect_filled(Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.min.y + 3.0)), Rounding::ZERO, C_ACCENT_DIM);
+            // Línea de acento superior
+            ui.painter().rect_filled(Rect::from_min_max(rect.min, Pos2::new(rect.max.x, rect.min.y + 2.0)), Rounding::ZERO, C_ACCENT);
 
-            ui.add_space(80.0);
+            ui.add_space(90.0);
             ui.vertical_centered(|ui| {
-                // Logo
-                ui.label(RichText::new("STEAM LITE").font(FontId::proportional(46.0)).color(C_ACCENT).strong());
+                ui.label(RichText::new("STEAM LITE").font(FontId::proportional(42.0)).color(C_ACCENT).strong());
                 ui.add_space(6.0);
-                ui.label(RichText::new("Cliente refinado · Bajo consumo · Sin compromiso").font(FontId::proportional(13.0)).color(C_TEXT_DIM));
-                ui.add_space(50.0);
+                ui.label(RichText::new("Cliente refinado · Bajo consumo de RAM").font(FontId::proportional(13.0)).color(C_TEXT_DIM));
+                ui.add_space(44.0);
 
-                egui::Frame::none().fill(C_PANEL).rounding(Rounding::same(10.0)).inner_margin(egui::Margin::same(32.0)).stroke(Stroke::new(1.0, C_BORDER)).show(ui, |ui| {
-                    ui.set_max_width(460.0);
-
-                    ui.label(RichText::new("Configuración inicial").font(FontId::proportional(17.0)).color(C_TEXT).strong());
+                egui::Frame::none().fill(C_PANEL).rounding(Rounding::same(8.0)).inner_margin(egui::Margin::same(30.0)).stroke(Stroke::new(1.0, C_BORDER)).show(ui, |ui| {
+                    ui.set_max_width(440.0);
+                    ui.label(RichText::new("Configuración inicial").font(FontId::proportional(16.0)).color(C_TEXT).strong());
                     ui.add_space(4.0);
                     ui.label(RichText::new("Solo necesitas hacerlo una vez.").font(FontId::proportional(12.0)).color(C_TEXT_DIM));
-                    ui.add_space(22.0);
+                    ui.add_space(20.0);
 
                     if self.autodetected {
-                        egui::Frame::none().fill(Color32::from_rgb(18, 45, 22)).rounding(Rounding::same(5.0)).inner_margin(egui::Margin::symmetric(12.0, 7.0)).stroke(Stroke::new(1.0, C_GREEN_DIM)).show(ui, |ui| {
+                        egui::Frame::none().fill(Color32::from_rgb(18, 45, 22)).rounding(Rounding::same(5.0)).inner_margin(egui::Margin::symmetric(12.0, 7.0)).stroke(Stroke::new(1.0, Color32::from_rgb(40, 100, 50))).show(ui, |ui| {
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("✓").color(C_GREEN).font(FontId::proportional(13.0)));
+                                ui.label(RichText::new("✓").color(C_GREEN).font(FontId::proportional(12.0)));
                                 ui.add_space(4.0);
                                 ui.label(RichText::new("Steam detectado automáticamente").font(FontId::proportional(12.0)).color(C_GREEN));
                             });
@@ -355,8 +444,8 @@ impl SteamLite {
 
                     ui.label(RichText::new("Ruta de instalación de Steam").font(FontId::proportional(12.0)).color(C_TEXT_DIM));
                     ui.add_space(4.0);
-                    egui::Frame::none().fill(Color32::from_rgb(13, 16, 22)).rounding(Rounding::same(5.0)).stroke(Stroke::new(1.0, C_BORDER_LIT)).inner_margin(egui::Margin::symmetric(10.0, 6.0)).show(ui, |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.input_path).desired_width(400.0).hint_text(r"C:\Program Files (x86)\Steam").frame(false).text_color(C_TEXT));
+                    egui::Frame::none().fill(Color32::from_rgb(13, 16, 22)).rounding(Rounding::same(5.0)).stroke(Stroke::new(1.0, C_BORDER_LIT)).inner_margin(egui::Margin::symmetric(10.0, 7.0)).show(ui, |ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.input_path).desired_width(380.0).hint_text(r"C:\Program Files (x86)\Steam").frame(false).text_color(C_TEXT));
                     });
 
                     if !self.setup_error.is_empty() {
@@ -367,13 +456,12 @@ impl SteamLite {
                     }
 
                     ui.add_space(20.0);
-                    let btn = ui.add_sized(Vec2::new(424.0, 40.0), egui::Button::new(RichText::new("Entrar →").font(FontId::proportional(14.0)).color(Color32::WHITE).strong()).fill(C_BTN).rounding(Rounding::same(5.0)));
-                    if btn.hovered() { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
+                    let btn = ui.add_sized(Vec2::new(400.0, 38.0), egui::Button::new(RichText::new("Entrar →").font(FontId::proportional(14.0)).color(Color32::WHITE).strong()).fill(C_BTN).rounding(Rounding::same(5.0)));
                     if btn.clicked() { self.do_setup(); }
                     if ui.input(|i| i.key_pressed(egui::Key::Enter)) { self.do_setup(); }
                 });
 
-                ui.add_space(20.0);
+                ui.add_space(18.0);
                 ui.label(RichText::new("🔒  Tus datos permanecen en tu PC. Sin telemetría.").font(FontId::proportional(11.0)).color(C_TEXT_FAINT));
             });
         });
@@ -384,82 +472,95 @@ impl SteamLite {
 
 impl SteamLite {
     fn show_main(&mut self, ctx: &egui::Context) {
-        // Procesar texturas
+        // Procesar texturas pendientes
         {
             let mut p = self.pending_imgs.lock().unwrap();
             for (id, bytes) in p.drain(..) {
                 if let Ok(img) = image::load_from_memory(&bytes) {
                     let img = img.to_rgba8();
                     let size = [img.width() as usize, img.height() as usize];
-                    let pixels = img.pixels().map(|p| egui::Color32::from_rgba_unmultiplied(p[0], p[1], p[2], p[3])).collect();
+                    let pixels = img.pixels().map(|px| egui::Color32::from_rgba_unmultiplied(px[0], px[1], px[2], px[3])).collect();
                     let tex = ctx.load_texture(format!("g{}", id), egui::ColorImage { size, pixels }, egui::TextureOptions::LINEAR);
                     self.textures.insert(id, tex);
                 }
             }
         }
 
+        // Resolver nombres en background si hay "App XXXXX"
+        {
+            let has_unnamed = self.games.lock().unwrap().iter().any(|g| !g.has_real_name());
+            let resolving = *self.resolving_names.lock().unwrap();
+            if has_unnamed && !resolving { self.resolve_names(); }
+        }
+
         // SIDEBAR
-        egui::SidePanel::left("sidebar").exact_width(220.0)
+        egui::SidePanel::left("sidebar").exact_width(210.0)
             .frame(egui::Frame::none().fill(C_SIDEBAR))
             .show(ctx, |ui| {
                 ui.set_min_height(ui.available_height());
 
-                // Logo area
+                // Header
                 egui::Frame::none().fill(C_TOPBAR).inner_margin(egui::Margin::symmetric(18.0, 16.0)).show(ui, |ui| {
-                    ui.set_min_width(220.0);
-                    ui.label(RichText::new("STEAM LITE").font(FontId::proportional(17.0)).color(C_ACCENT).strong());
-                    ui.add_space(2.0);
+                    ui.set_min_width(210.0);
+                    ui.label(RichText::new("STEAM LITE").font(FontId::proportional(16.0)).color(C_ACCENT).strong());
+                    ui.add_space(3.0);
                     let cnt = self.games.lock().unwrap().len();
                     let loading = *self.loading.lock().unwrap();
+                    let resolving = *self.resolving_names.lock().unwrap();
                     if loading {
-                        ui.label(RichText::new("Cargando...").font(FontId::proportional(11.0)).color(C_TEXT_DIM));
+                        ui.label(RichText::new("Cargando biblioteca...").font(FontId::proportional(11.0)).color(C_TEXT_DIM));
+                    } else if resolving {
+                        ui.label(RichText::new(format!("{} juegos · Obteniendo nombres...", cnt)).font(FontId::proportional(11.0)).color(C_TEXT_DIM));
                     } else {
                         ui.label(RichText::new(format!("{} juegos en biblioteca", cnt)).font(FontId::proportional(11.0)).color(C_TEXT_DIM));
                     }
                 });
 
-                ui.add_space(8.0);
+                ui.add_space(10.0);
 
-                // Nav
-                let nav_items = [("  🎮  Biblioteca", Tab::Library), ("  👥  Amigos", Tab::Friends), ("  ⚙   Ajustes", Tab::Settings)];
-                for (label, t) in &nav_items {
-                    let selected = self.tab == *t;
-                    let response = ui.add_sized(
-                        Vec2::new(220.0, 36.0),
-                        egui::Button::new(RichText::new(*label).font(FontId::proportional(13.0)).color(if selected { C_ACCENT } else { C_TEXT }))
-                            .fill(if selected { Color32::from_rgb(25, 40, 60) } else { Color32::TRANSPARENT })
-                            .rounding(Rounding::ZERO)
-                            .frame(true),
-                    );
+                // Nav items
+                for (icon, label, t) in [("🎮", "Biblioteca", Tab::Library), ("👥", "Amigos", Tab::Friends), ("⚙", "Ajustes", Tab::Settings)] {
+                    let selected = self.tab == t;
+                    let resp = egui::Frame::none()
+                        .fill(if selected { Color32::from_rgb(22, 38, 58) } else { Color32::TRANSPARENT })
+                        .inner_margin(egui::Margin::symmetric(18.0, 10.0))
+                        .show(ui, |ui| {
+                            ui.set_min_width(210.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(icon).font(FontId::proportional(13.0)).color(if selected { C_ACCENT } else { C_TEXT_DIM }));
+                                ui.add_space(8.0);
+                                ui.label(RichText::new(label).font(FontId::proportional(13.0)).color(if selected { C_TEXT } else { C_TEXT_DIM }));
+                            });
+                        });
+                    // Barra indicadora lateral
                     if selected {
-                        let r = response.rect;
+                        let r = resp.response.rect;
                         ui.painter().rect_filled(Rect::from_min_max(r.min, Pos2::new(r.min.x + 3.0, r.max.y)), Rounding::ZERO, C_ACCENT);
                     }
-                    if response.clicked() { self.tab = t.clone(); }
+                    if resp.response.interact(egui::Sense::click()).clicked() { self.tab = t; }
                 }
 
-                ui.add_space(16.0);
+                ui.add_space(14.0);
                 ui.add(egui::Separator::default().spacing(0.0));
                 ui.add_space(12.0);
 
-                // Status
+                // Estado actual
                 let ds = self.dl_status.lock().unwrap().clone();
-                if !ds.is_empty() {
-                    egui::Frame::none().inner_margin(egui::Margin::symmetric(14.0, 0.0)).show(ui, |ui| {
+                egui::Frame::none().inner_margin(egui::Margin::symmetric(16.0, 0.0)).show(ui, |ui| {
+                    if !ds.is_empty() {
                         ui.label(RichText::new(&ds).font(FontId::proportional(11.0)).color(C_GREEN));
-                    });
-                } else if let Some(name) = &self.last_played.clone() {
-                    egui::Frame::none().inner_margin(egui::Margin::symmetric(14.0, 0.0)).show(ui, |ui| {
-                        ui.label(RichText::new("En juego").font(FontId::proportional(10.0)).color(C_TEXT_DIM));
-                        ui.label(RichText::new(name).font(FontId::proportional(12.0)).color(C_GREEN).strong());
-                    });
-                }
+                    } else if let Some(name) = &self.last_played.clone() {
+                        ui.label(RichText::new("EN JUEGO").font(FontId::proportional(9.5)).color(C_TEXT_FAINT).strong());
+                        ui.add_space(2.0);
+                        ui.label(RichText::new(name).font(FontId::proportional(11.5)).color(C_GREEN));
+                    }
+                });
 
-                // Bottom - cerrar sesion
-                let available = ui.available_height();
-                if available > 40.0 { ui.add_space(available - 40.0); }
-                egui::Frame::none().inner_margin(egui::Margin::symmetric(14.0, 8.0)).show(ui, |ui| {
-                    if ui.add(egui::Button::new(RichText::new("Cerrar sesión").font(FontId::proportional(11.0)).color(C_TEXT_DIM)).fill(Color32::TRANSPARENT).rounding(Rounding::same(4.0))).clicked() {
+                // Cerrar sesión abajo
+                let avail = ui.available_height();
+                if avail > 36.0 { ui.add_space(avail - 36.0); }
+                egui::Frame::none().inner_margin(egui::Margin::symmetric(16.0, 6.0)).show(ui, |ui| {
+                    if ui.add(egui::Button::new(RichText::new("Cerrar sesión").font(FontId::proportional(11.0)).color(C_TEXT_FAINT)).fill(Color32::TRANSPARENT).rounding(Rounding::same(4.0))).clicked() {
                         delete_config(); self.config = None; self.screen = Screen::Setup; *self.games.lock().unwrap() = vec![];
                     }
                 });
@@ -468,7 +569,7 @@ impl SteamLite {
         // Error banner
         let error = self.load_error.lock().unwrap().clone();
         if !error.is_empty() {
-            egui::TopBottomPanel::top("err").frame(egui::Frame::none().fill(Color32::from_rgb(90, 18, 18)).inner_margin(egui::Margin::symmetric(16.0, 8.0))).show(ctx, |ui| {
+            egui::TopBottomPanel::top("err").frame(egui::Frame::none().fill(Color32::from_rgb(80, 18, 18)).inner_margin(egui::Margin::symmetric(16.0, 8.0))).show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("⚠").color(C_RED));
                     ui.add_space(6.0);
@@ -486,39 +587,35 @@ impl SteamLite {
             Tab::Settings => self.show_settings(ctx),
         }
 
-        if !self.pending_imgs.lock().unwrap().is_empty() || *self.loading.lock().unwrap() { ctx.request_repaint(); }
+        if !self.pending_imgs.lock().unwrap().is_empty() || *self.loading.lock().unwrap() || *self.resolving_names.lock().unwrap() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+        }
     }
 
     // ===================== LIBRARY =====================
 
     fn show_library(&mut self, ctx: &egui::Context) {
-        // Topbar de biblioteca
         egui::TopBottomPanel::top("lib_top").frame(egui::Frame::none().fill(C_TOPBAR).inner_margin(egui::Margin::symmetric(18.0, 10.0))).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                // Searchbox
                 egui::Frame::none().fill(Color32::from_rgb(13, 16, 22)).rounding(Rounding::same(5.0)).stroke(Stroke::new(1.0, C_BORDER_LIT)).inner_margin(egui::Margin::symmetric(10.0, 5.0)).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("🔍").font(FontId::proportional(12.0)).color(C_TEXT_DIM));
+                        ui.label(RichText::new("🔍").font(FontId::proportional(11.0)).color(C_TEXT_DIM));
                         ui.add_space(4.0);
-                        ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(220.0).hint_text("Buscar juego...").frame(false).text_color(C_TEXT));
+                        ui.add(egui::TextEdit::singleline(&mut self.search).desired_width(200.0).hint_text("Buscar juego...").frame(false).text_color(C_TEXT));
                     });
                 });
 
-                ui.add_space(12.0);
+                ui.add_space(10.0);
 
-                // Filtros rápidos
-                for (label, active) in [("Todos", true), ("Instalados", false)] {
-                    let fg = if active { C_ACCENT } else { C_TEXT_DIM };
-                    let bg = if active { Color32::from_rgb(25, 45, 65) } else { Color32::TRANSPARENT };
-                    ui.add(egui::Button::new(RichText::new(label).font(FontId::proportional(12.0)).color(fg)).fill(bg).rounding(Rounding::same(4.0)));
+                // Filtros
+                for (label, active) in [("Todos", !self.show_installed_only), ("Instalados", self.show_installed_only)] {
+                    let btn = ui.add(egui::Button::new(RichText::new(label).font(FontId::proportional(12.0)).color(if active { C_ACCENT } else { C_TEXT_DIM }))
+                        .fill(if active { Color32::from_rgb(22, 40, 60) } else { Color32::TRANSPARENT })
+                        .rounding(Rounding::same(4.0)));
+                    if btn.clicked() { self.show_installed_only = label == "Instalados"; }
                 }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    // Toggle vista
-                    let grid_active = self.lib_view == LibraryView::Grid;
-                    if ui.add(egui::Button::new(RichText::new("▦").font(FontId::proportional(14.0)).color(if grid_active { C_ACCENT } else { C_TEXT_DIM })).fill(if grid_active { Color32::from_rgb(25, 45, 65) } else { Color32::TRANSPARENT }).rounding(Rounding::same(4.0))).clicked() { self.lib_view = LibraryView::Grid; }
-                    if ui.add(egui::Button::new(RichText::new("≡").font(FontId::proportional(16.0)).color(if !grid_active { C_ACCENT } else { C_TEXT_DIM })).fill(if !grid_active { Color32::from_rgb(25, 45, 65) } else { Color32::TRANSPARENT }).rounding(Rounding::same(4.0))).clicked() { self.lib_view = LibraryView::List; }
-                    ui.add_space(8.0);
                     if ui.add(egui::Button::new(RichText::new("↺").font(FontId::proportional(14.0)).color(C_TEXT_DIM)).fill(Color32::TRANSPARENT).rounding(Rounding::same(4.0))).clicked() { self.reload(); }
                 });
             });
@@ -527,143 +624,124 @@ impl SteamLite {
         let games_snap: Vec<Game> = {
             let gs = self.games.lock().unwrap();
             let q = self.search.to_lowercase();
-            gs.iter().filter(|g| q.is_empty() || g.name.to_lowercase().contains(&q)).cloned().collect()
+            gs.iter().filter(|g| {
+                let name_ok = q.is_empty() || g.name.to_lowercase().contains(&q);
+                let filter_ok = !self.show_installed_only || g.installed;
+                name_ok && filter_ok
+            }).cloned().collect()
         };
 
-        // Precargar imágenes
-        for g in games_snap.iter().take(40) { if !self.textures.contains_key(&g.appid) { self.req_img(g.appid, g.img_url()); } }
+        // Precargar solo primeras 40 imágenes
+        for g in games_snap.iter().take(40) {
+            if !self.textures.contains_key(&g.appid) { self.req_img(g.appid, g.img_url()); }
+        }
 
         let mut launch: Option<Game> = None;
         let mut install_id: Option<u64> = None;
         let mut open_url: Option<String> = None;
 
         egui::CentralPanel::default().frame(egui::Frame::none().fill(C_BG)).show(ctx, |ui| {
-            if games_snap.is_empty() && !*self.loading.lock().unwrap() {
-                ui.centered_and_justified(|ui| { ui.label(RichText::new("No se encontraron juegos").font(FontId::proportional(16.0)).color(C_TEXT_DIM)); });
+            if games_snap.is_empty() {
+                ui.centered_and_justified(|ui| {
+                    ui.label(RichText::new("No se encontraron juegos").font(FontId::proportional(15.0)).color(C_TEXT_DIM));
+                });
                 return;
             }
 
-            match self.lib_view {
-                LibraryView::Grid => {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.add_space(14.0);
-                        let cw = 210.0_f32;
-                        let ch = 98.0_f32;
-                        let sp = 10.0_f32;
-                        let cols = ((ui.available_width() - 28.0 + sp) / (cw + sp)).floor().max(1.0) as usize;
+            egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+                ui.add_space(14.0);
 
-                        ui.horizontal(|ui| { ui.add_space(14.0); });
+                let sp = 10.0_f32;
+                let padding = 28.0_f32;
+                let available_w = ui.available_width() - padding;
+                let cols = ((available_w + sp) / (CARD_W + sp)).floor().max(1.0) as usize;
+                // Centrar el grid
+                let total_w = cols as f32 * CARD_W + (cols - 1) as f32 * sp;
+                let left_margin = ((available_w - total_w) / 2.0).max(14.0);
 
-                        egui::Grid::new("grid").num_columns(cols).spacing(Vec2::splat(sp)).min_col_width(cw).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add_space(left_margin);
+                    egui::Grid::new("grid")
+                        .num_columns(cols)
+                        .spacing(Vec2::splat(sp))
+                        .min_col_width(CARD_W)
+                        .max_col_width(CARD_W)
+                        .show(ui, |ui| {
                             for (i, g) in games_snap.iter().enumerate() {
                                 if i > 0 && i % cols == 0 { ui.end_row(); }
 
-                                let selected = self.selected_game == Some(g.appid);
-                                let border = if selected { C_ACCENT } else if g.installed { C_BORDER_LIT } else { C_BORDER };
+                                // Card con altura FIJA
+                                egui::Frame::none()
+                                    .fill(C_CARD)
+                                    .rounding(Rounding::same(6.0))
+                                    .stroke(Stroke::new(1.0, if g.installed { C_BORDER_LIT } else { C_BORDER }))
+                                    .show(ui, |ui| {
+                                        ui.set_width(CARD_W);
+                                        ui.set_min_height(CARD_H);
+                                        ui.set_max_height(CARD_H);
 
-                                let response = egui::Frame::none().fill(C_CARD).rounding(Rounding::same(6.0)).stroke(Stroke::new(1.0, border)).show(ui, |ui| {
-                                    ui.set_max_width(cw);
-
-                                    // Imagen
-                                    if let Some(tex) = self.textures.get(&g.appid) {
-                                        ui.add(egui::Image::new(tex).max_width(cw).max_height(ch).rounding(Rounding { nw: 5.0, ne: 5.0, sw: 0.0, se: 0.0 }));
-                                    } else {
-                                        let (rect, _) = ui.allocate_exact_size(Vec2::new(cw, ch), egui::Sense::hover());
-                                        ui.painter().rect_filled(rect, Rounding { nw: 5.0, ne: 5.0, sw: 0.0, se: 0.0 }, Color32::from_rgb(18, 22, 32));
-                                        ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, &g.name, FontId::proportional(9.5), C_TEXT_FAINT);
-                                    }
-
-                                    // Info
-                                    egui::Frame::none().inner_margin(egui::Margin::symmetric(8.0, 6.0)).show(ui, |ui| {
-                                        // Nombre truncado
-                                        let name = if g.name.len() > 26 { format!("{}...", &g.name[..23]) } else { g.name.clone() };
-                                        ui.label(RichText::new(&name).font(FontId::proportional(11.5)).color(C_TEXT).strong());
-
-                                        ui.horizontal(|ui| {
-                                            if g.installed {
-                                                let (r, _) = ui.allocate_exact_size(Vec2::new(6.0, 6.0), egui::Sense::hover());
-                                                ui.painter().circle_filled(r.center(), 3.0, C_GREEN);
-                                                ui.add_space(2.0);
-                                                ui.label(RichText::new("Instalado").font(FontId::proportional(10.0)).color(C_GREEN));
-                                            } else {
-                                                ui.label(RichText::new(g.playtime_str()).font(FontId::proportional(10.0)).color(C_TEXT_DIM));
+                                        // Imagen con altura FIJA siempre
+                                        if let Some(tex) = self.textures.get(&g.appid) {
+                                            let img = egui::Image::new(tex)
+                                                .fit_to_exact_size(Vec2::new(CARD_W, CARD_IMG_H))
+                                                .rounding(Rounding { nw: 5.0, ne: 5.0, sw: 0.0, se: 0.0 });
+                                            ui.add(img);
+                                        } else {
+                                            // Placeholder mismo tamaño siempre
+                                            let (rect, _) = ui.allocate_exact_size(Vec2::new(CARD_W, CARD_IMG_H), egui::Sense::hover());
+                                            ui.painter().rect_filled(rect, Rounding { nw: 5.0, ne: 5.0, sw: 0.0, se: 0.0 }, Color32::from_rgb(18, 22, 32));
+                                            // Spinner si está cargando
+                                            let t = ui.input(|i| i.time);
+                                            let angle = (t * 2.0) as f32;
+                                            for k in 0..8 {
+                                                let a = angle + k as f32 * std::f32::consts::PI / 4.0;
+                                                let alpha = ((k as f32 / 8.0) * 180.0) as u8;
+                                                let off = Pos2::new(rect.center().x + a.cos() * 8.0, rect.center().y + a.sin() * 8.0);
+                                                ui.painter().circle_filled(off, 2.0, Color32::from_rgba_unmultiplied(102, 192, 244, alpha));
                                             }
-                                        });
+                                        }
 
-                                        ui.add_space(5.0);
+                                        // Info — altura fija también
+                                        egui::Frame::none().inner_margin(egui::Margin::symmetric(9.0, 7.0)).show(ui, |ui| {
+                                            ui.set_width(CARD_W - 18.0);
+                                            ui.set_max_height(CARD_INFO_H - 14.0);
 
-                                        ui.horizontal(|ui| {
-                                            if g.installed {
-                                                let play = ui.add(egui::Button::new(RichText::new("▶  Jugar").font(FontId::proportional(11.0)).color(Color32::WHITE).strong()).fill(C_BTN).rounding(Rounding::same(4.0)).min_size(Vec2::new(82.0, 24.0)));
-                                                if play.hovered() { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
-                                                if play.clicked() { launch = Some(g.clone()); }
-                                            } else {
-                                                let inst = ui.add(egui::Button::new(RichText::new("⬇  Instalar").font(FontId::proportional(10.5)).color(Color32::WHITE).strong()).fill(C_BTN_GREEN).rounding(Rounding::same(4.0)).min_size(Vec2::new(82.0, 24.0)));
-                                                if inst.hovered() { ctx.set_cursor_icon(egui::CursorIcon::PointingHand); }
-                                                if inst.clicked() { install_id = Some(g.appid); }
-                                            }
-                                            ui.add_space(4.0);
-                                            let store = ui.add(egui::Button::new(RichText::new("···").font(FontId::proportional(13.0)).color(C_TEXT_DIM)).fill(Color32::from_rgb(28, 35, 48)).rounding(Rounding::same(4.0)).min_size(Vec2::new(26.0, 24.0)));
-                                            if store.clicked() { open_url = Some(g.store_url()); }
+                                            // Nombre (máx 2 líneas)
+                                            let name = if g.name.len() > 28 { format!("{}...", &g.name[..25]) } else { g.name.clone() };
+                                            ui.label(RichText::new(&name).font(FontId::proportional(11.5)).color(C_TEXT).strong());
+
+                                            ui.horizontal(|ui| {
+                                                if g.installed {
+                                                    let (r, _) = ui.allocate_exact_size(Vec2::new(6.0, 6.0), egui::Sense::hover());
+                                                    ui.painter().circle_filled(r.center(), 3.0, C_GREEN);
+                                                    ui.add_space(2.0);
+                                                    ui.label(RichText::new("Instalado").font(FontId::proportional(10.0)).color(C_GREEN));
+                                                } else {
+                                                    ui.label(RichText::new(g.playtime_str()).font(FontId::proportional(10.0)).color(C_TEXT_DIM));
+                                                }
+                                            });
+
+                                            ui.add_space(5.0);
+
+                                            ui.horizontal(|ui| {
+                                                if g.installed {
+                                                    let play = ui.add(egui::Button::new(RichText::new("▶  Jugar").font(FontId::proportional(10.5)).color(Color32::WHITE).strong()).fill(C_BTN).rounding(Rounding::same(4.0)).min_size(Vec2::new(76.0, 22.0)));
+                                                    if play.clicked() { launch = Some(g.clone()); }
+                                                } else {
+                                                    let inst = ui.add(egui::Button::new(RichText::new("⬇  Instalar").font(FontId::proportional(10.0)).color(Color32::WHITE).strong()).fill(C_BTN_GREEN).rounding(Rounding::same(4.0)).min_size(Vec2::new(76.0, 22.0)));
+                                                    if inst.clicked() { install_id = Some(g.appid); }
+                                                }
+                                                ui.add_space(3.0);
+                                                let more = ui.add(egui::Button::new(RichText::new("···").font(FontId::proportional(12.0)).color(C_TEXT_DIM)).fill(Color32::from_rgb(26, 33, 46)).rounding(Rounding::same(4.0)).min_size(Vec2::new(24.0, 22.0)));
+                                                if more.clicked() { open_url = Some(g.store_url()); }
+                                            });
                                         });
-                                        ui.add_space(4.0);
                                     });
-                                });
-
-                                if response.response.interact(egui::Sense::click()).clicked() {
-                                    self.selected_game = Some(g.appid);
-                                }
                             }
                         });
-                        ui.add_space(20.0);
-                    });
-                }
-                LibraryView::List => {
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        ui.add_space(8.0);
-                        for g in &games_snap {
-                            let selected = self.selected_game == Some(g.appid);
-                            let bg = if selected { C_CARD_HOVER } else { C_CARD };
-
-                            let resp = egui::Frame::none().fill(bg).rounding(Rounding::same(5.0)).inner_margin(egui::Margin::symmetric(14.0, 8.0)).stroke(Stroke::new(1.0, if selected { C_BORDER_LIT } else { C_BORDER })).show(ui, |ui| {
-                                ui.set_min_width(ui.available_width() - 28.0);
-                                ui.horizontal(|ui| {
-                                    // Miniatura
-                                    if let Some(tex) = self.textures.get(&g.appid) {
-                                        ui.add(egui::Image::new(tex).max_width(72.0).max_height(34.0).rounding(Rounding::same(3.0)));
-                                    } else {
-                                        let (r, _) = ui.allocate_exact_size(Vec2::new(72.0, 34.0), egui::Sense::hover());
-                                        ui.painter().rect_filled(r, Rounding::same(3.0), C_BG);
-                                    }
-                                    ui.add_space(10.0);
-
-                                    ui.vertical(|ui| {
-                                        ui.label(RichText::new(&g.name).font(FontId::proportional(13.0)).color(C_TEXT).strong());
-                                        ui.label(RichText::new(g.playtime_str()).font(FontId::proportional(11.0)).color(C_TEXT_DIM));
-                                    });
-
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        if g.installed {
-                                            if ui.add(egui::Button::new(RichText::new("▶  Jugar").font(FontId::proportional(11.0)).color(Color32::WHITE)).fill(C_BTN).rounding(Rounding::same(4.0)).min_size(Vec2::new(80.0, 26.0))).clicked() { launch = Some(g.clone()); }
-                                        } else {
-                                            if ui.add(egui::Button::new(RichText::new("⬇  Instalar").font(FontId::proportional(11.0)).color(Color32::WHITE)).fill(C_BTN_GREEN).rounding(Rounding::same(4.0)).min_size(Vec2::new(80.0, 26.0))).clicked() { install_id = Some(g.appid); }
-                                        }
-                                        ui.add_space(8.0);
-                                        if g.installed {
-                                            let (r, _) = ui.allocate_exact_size(Vec2::new(8.0, 8.0), egui::Sense::hover());
-                                            ui.painter().circle_filled(r.center(), 4.0, C_GREEN);
-                                        }
-                                    });
-                                });
-                            });
-
-                            if resp.response.interact(egui::Sense::click()).clicked() { self.selected_game = Some(g.appid); }
-                            ui.add_space(3.0);
-                        }
-                        ui.add_space(16.0);
-                    });
-                }
-            }
+                });
+                ui.add_space(20.0);
+            });
         });
 
         if let Some(g) = launch { open::that(g.launch_url()).ok(); self.last_played = Some(g.name); ctx.request_repaint(); }
@@ -678,8 +756,8 @@ impl SteamLite {
 
         egui::TopBottomPanel::top("fr_top").frame(egui::Frame::none().fill(C_TOPBAR).inner_margin(egui::Margin::symmetric(18.0, 12.0))).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new("Amigos").font(FontId::proportional(16.0)).color(C_TEXT).strong());
-                ui.add_space(8.0);
+                ui.label(RichText::new("Amigos").font(FontId::proportional(15.0)).color(C_TEXT).strong());
+                ui.add_space(10.0);
                 let online = friends.iter().filter(|f| f.state > 0).count();
                 ui.label(RichText::new(format!("{} en línea  ·  {} total", online, friends.len())).font(FontId::proportional(12.0)).color(C_TEXT_DIM));
             });
@@ -687,26 +765,40 @@ impl SteamLite {
 
         egui::CentralPanel::default().frame(egui::Frame::none().fill(C_BG)).show(ctx, |ui| {
             if friends.is_empty() {
-                ui.centered_and_justified(|ui| { ui.label(RichText::new("Abre Steam una vez para sincronizar la lista de amigos.").font(FontId::proportional(14.0)).color(C_TEXT_DIM)); });
+                ui.centered_and_justified(|ui| {
+                    ui.vertical_centered(|ui| {
+                        ui.add_space(60.0);
+                        ui.label(RichText::new("👥").font(FontId::proportional(40.0)));
+                        ui.add_space(12.0);
+                        ui.label(RichText::new("No se encontraron amigos").font(FontId::proportional(15.0)).color(C_TEXT_DIM));
+                        ui.add_space(6.0);
+                        ui.label(RichText::new("Abre Steam una vez para sincronizar la lista.").font(FontId::proportional(12.0)).color(C_TEXT_FAINT));
+                    });
+                });
                 return;
             }
 
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(10.0);
+                ui.add_space(12.0);
 
-                // Agrupar: online primero
                 let online: Vec<&Friend> = friends.iter().filter(|f| f.state > 0).collect();
                 let offline: Vec<&Friend> = friends.iter().filter(|f| f.state == 0).collect();
 
                 if !online.is_empty() {
-                    ui.horizontal(|ui| { ui.add_space(14.0); ui.label(RichText::new(format!("EN LÍNEA — {}", online.len())).font(FontId::proportional(10.5)).color(C_TEXT_FAINT).strong()); });
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.label(RichText::new(format!("EN LÍNEA — {}", online.len())).font(FontId::proportional(10.0)).color(C_TEXT_FAINT).strong());
+                    });
                     ui.add_space(6.0);
                     for f in &online { self.draw_friend(ui, f); }
-                    ui.add_space(12.0);
+                    ui.add_space(14.0);
                 }
 
                 if !offline.is_empty() {
-                    ui.horizontal(|ui| { ui.add_space(14.0); ui.label(RichText::new(format!("DESCONECTADO — {}", offline.len())).font(FontId::proportional(10.5)).color(C_TEXT_FAINT).strong()); });
+                    ui.horizontal(|ui| {
+                        ui.add_space(16.0);
+                        ui.label(RichText::new(format!("DESCONECTADO — {}", offline.len())).font(FontId::proportional(10.0)).color(C_TEXT_FAINT).strong());
+                    });
                     ui.add_space(6.0);
                     for f in &offline { self.draw_friend(ui, f); }
                 }
@@ -717,27 +809,29 @@ impl SteamLite {
     }
 
     fn draw_friend(&self, ui: &mut egui::Ui, f: &Friend) {
-        egui::Frame::none().fill(C_CARD).rounding(Rounding::same(5.0)).inner_margin(egui::Margin::symmetric(14.0, 9.0)).stroke(Stroke::new(1.0, C_BORDER)).show(ui, |ui| {
-            ui.set_min_width(ui.available_width() - 28.0);
-            ui.horizontal(|ui| {
-                // Avatar placeholder
-                let (r, _) = ui.allocate_exact_size(Vec2::new(32.0, 32.0), egui::Sense::hover());
-                ui.painter().rect_filled(r, Rounding::same(4.0), Color32::from_rgb(30, 40, 55));
-                let initials = f.name.chars().next().unwrap_or('?').to_uppercase().to_string();
-                ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, &initials, FontId::proportional(14.0), C_TEXT_DIM);
+        ui.horizontal(|ui| {
+            ui.add_space(16.0);
+            egui::Frame::none().fill(C_CARD).rounding(Rounding::same(5.0)).inner_margin(egui::Margin::symmetric(12.0, 9.0)).stroke(Stroke::new(1.0, C_BORDER)).show(ui, |ui| {
+                ui.set_min_width(ui.available_width() - 16.0);
+                ui.horizontal(|ui| {
+                    // Avatar con inicial
+                    let (r, _) = ui.allocate_exact_size(Vec2::new(34.0, 34.0), egui::Sense::hover());
+                    ui.painter().rect_filled(r, Rounding::same(4.0), Color32::from_rgb(28, 38, 54));
+                    let init = f.name.chars().next().unwrap_or('?').to_uppercase().to_string();
+                    ui.painter().text(r.center(), egui::Align2::CENTER_CENTER, &init, FontId::proportional(14.0), C_TEXT_DIM);
+                    // Punto estado
+                    ui.painter().circle_filled(Pos2::new(r.max.x - 3.0, r.max.y - 3.0), 5.0, C_BG);
+                    ui.painter().circle_filled(Pos2::new(r.max.x - 3.0, r.max.y - 3.0), 4.0, f.state_color());
 
-                // Punto de estado sobre el avatar
-                ui.painter().circle_filled(Pos2::new(r.max.x - 4.0, r.max.y - 4.0), 5.0, C_BG);
-                ui.painter().circle_filled(Pos2::new(r.max.x - 4.0, r.max.y - 4.0), 4.0, f.state_color());
-
-                ui.add_space(10.0);
-                ui.vertical(|ui| {
-                    ui.label(RichText::new(&f.name).font(FontId::proportional(13.0)).color(C_TEXT).strong());
-                    if let Some(g) = &f.game {
-                        ui.label(RichText::new(format!("▶ {}", g)).font(FontId::proportional(11.0)).color(C_GREEN));
-                    } else {
-                        ui.label(RichText::new(f.status_label()).font(FontId::proportional(11.0)).color(C_TEXT_DIM));
-                    }
+                    ui.add_space(10.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&f.name).font(FontId::proportional(13.0)).color(C_TEXT).strong());
+                        if let Some(g) = &f.game {
+                            ui.label(RichText::new(format!("▶  {}", g)).font(FontId::proportional(11.0)).color(C_GREEN));
+                        } else {
+                            ui.label(RichText::new(f.status_label()).font(FontId::proportional(11.0)).color(C_TEXT_DIM));
+                        }
+                    });
                 });
             });
         });
@@ -748,7 +842,7 @@ impl SteamLite {
 
     fn show_settings(&mut self, ctx: &egui::Context) {
         egui::TopBottomPanel::top("set_top").frame(egui::Frame::none().fill(C_TOPBAR).inner_margin(egui::Margin::symmetric(18.0, 12.0))).show(ctx, |ui| {
-            ui.label(RichText::new("Ajustes").font(FontId::proportional(16.0)).color(C_TEXT).strong());
+            ui.label(RichText::new("Ajustes").font(FontId::proportional(15.0)).color(C_TEXT).strong());
         });
 
         egui::CentralPanel::default().frame(egui::Frame::none().fill(C_BG)).show(ctx, |ui| {
@@ -760,45 +854,51 @@ impl SteamLite {
                         ui.set_max_width(520.0);
 
                         // SteamCMD
-                        self.settings_section(ui, "SteamCMD — Descarga directa de juegos", |ui, s| {
+                        egui::Frame::none().fill(C_PANEL).rounding(Rounding::same(7.0)).inner_margin(egui::Margin::same(18.0)).stroke(Stroke::new(1.0, C_BORDER)).show(ui, |ui| {
+                            ui.set_max_width(520.0);
+                            ui.label(RichText::new("SteamCMD — Descarga directa").font(FontId::proportional(13.0)).color(C_TEXT).strong());
+                            ui.add_space(12.0);
                             ui.label(RichText::new("Usuario de Steam").font(FontId::proportional(12.0)).color(C_TEXT_DIM));
                             ui.add_space(3.0);
-                            ui.add(egui::TextEdit::singleline(&mut s.steamcmd_user).desired_width(320.0).hint_text("usuario_steam").text_color(C_TEXT));
+                            ui.add(egui::TextEdit::singleline(&mut self.steamcmd_user).desired_width(300.0).hint_text("usuario_steam").text_color(C_TEXT));
                             ui.add_space(10.0);
                             ui.label(RichText::new("Contraseña").font(FontId::proportional(12.0)).color(C_TEXT_DIM));
                             ui.add_space(3.0);
-                            ui.add(egui::TextEdit::singleline(&mut s.steamcmd_pass).desired_width(320.0).password(true).hint_text("••••••••").text_color(C_TEXT));
+                            ui.add(egui::TextEdit::singleline(&mut self.steamcmd_pass).desired_width(300.0).password(true).hint_text("••••••••").text_color(C_TEXT));
                             ui.add_space(10.0);
-                            ui.label(RichText::new("Código Steam Guard (si lo pide)").font(FontId::proportional(12.0)).color(C_TEXT_DIM));
+                            ui.label(RichText::new("Steam Guard (si lo pide)").font(FontId::proportional(12.0)).color(C_TEXT_DIM));
                             ui.add_space(3.0);
-                            ui.add(egui::TextEdit::singleline(&mut s.steamcmd_guard).desired_width(200.0).hint_text("Déjalo vacío si no lo pide").text_color(C_TEXT));
+                            ui.add(egui::TextEdit::singleline(&mut self.steamcmd_guard).desired_width(200.0).hint_text("Déjalo vacío si no lo pide").text_color(C_TEXT));
                         });
 
-                        ui.add_space(14.0);
+                        ui.add_space(12.0);
 
                         // Acciones
-                        self.settings_section(ui, "Acciones", |ui, s| {
+                        egui::Frame::none().fill(C_PANEL).rounding(Rounding::same(7.0)).inner_margin(egui::Margin::same(18.0)).stroke(Stroke::new(1.0, C_BORDER)).show(ui, |ui| {
+                            ui.set_max_width(520.0);
+                            ui.label(RichText::new("Acciones").font(FontId::proportional(13.0)).color(C_TEXT).strong());
+                            ui.add_space(12.0);
                             ui.horizontal(|ui| {
-                                if ui.add(egui::Button::new(RichText::new("↺  Recargar biblioteca").font(FontId::proportional(12.0)).color(C_TEXT)).fill(Color32::from_rgb(28, 38, 55)).rounding(Rounding::same(5.0)).min_size(Vec2::new(160.0, 30.0))).clicked() { s.reload(); }
+                                if ui.add(egui::Button::new(RichText::new("↺  Recargar").font(FontId::proportional(12.0)).color(C_TEXT)).fill(Color32::from_rgb(28, 38, 55)).rounding(Rounding::same(5.0)).min_size(Vec2::new(120.0, 30.0))).clicked() { self.reload(); }
                                 ui.add_space(8.0);
                                 if ui.add(egui::Button::new(RichText::new("Abrir Steam").font(FontId::proportional(12.0)).color(C_TEXT)).fill(Color32::from_rgb(28, 38, 55)).rounding(Rounding::same(5.0)).min_size(Vec2::new(110.0, 30.0))).clicked() {
-                                    Command::new("cmd").args(["/C", "start", "", r"C:\Program Files (x86)\Steam\steam.exe"]).spawn().ok();
+                                    Command::new("cmd").args(["/C", "start", "", r"C:\Program Files (x86)\Steam\steam.exe", "-no-browser", "-silent"]).spawn().ok();
                                 }
                             });
-                            ui.add_space(12.0);
-                            if let Some(cfg) = &s.config {
+                            ui.add_space(10.0);
+                            if let Some(cfg) = &self.config {
                                 ui.label(RichText::new(format!("Steam: {}", cfg.steam_path)).font(FontId::proportional(11.0)).color(C_TEXT_FAINT));
                             }
                         });
 
-                        ui.add_space(14.0);
+                        ui.add_space(12.0);
 
-                        // Zona de peligro
-                        egui::Frame::none().fill(Color32::from_rgb(28, 18, 18)).rounding(Rounding::same(8.0)).inner_margin(egui::Margin::same(18.0)).stroke(Stroke::new(1.0, Color32::from_rgb(80, 30, 30))).show(ui, |ui| {
+                        // Zona peligro
+                        egui::Frame::none().fill(Color32::from_rgb(26, 16, 16)).rounding(Rounding::same(7.0)).inner_margin(egui::Margin::same(18.0)).stroke(Stroke::new(1.0, Color32::from_rgb(70, 25, 25))).show(ui, |ui| {
                             ui.set_max_width(520.0);
                             ui.label(RichText::new("Zona de peligro").font(FontId::proportional(13.0)).color(C_RED).strong());
                             ui.add_space(10.0);
-                            if ui.add(egui::Button::new(RichText::new("Resetear configuración").font(FontId::proportional(12.0)).color(C_RED)).fill(Color32::from_rgb(45, 15, 15)).rounding(Rounding::same(5.0)).min_size(Vec2::new(180.0, 30.0))).clicked() {
+                            if ui.add(egui::Button::new(RichText::new("Resetear configuración").font(FontId::proportional(12.0)).color(C_RED)).fill(Color32::from_rgb(40, 12, 12)).rounding(Rounding::same(5.0)).min_size(Vec2::new(180.0, 30.0))).clicked() {
                                 delete_config(); self.config = None; self.screen = Screen::Setup; *self.games.lock().unwrap() = vec![];
                             }
                         });
@@ -809,40 +909,32 @@ impl SteamLite {
         });
     }
 
-    fn settings_section(&mut self, ui: &mut egui::Ui, title: &str, content: impl FnOnce(&mut egui::Ui, &mut SteamLite)) {
-        egui::Frame::none().fill(C_PANEL).rounding(Rounding::same(8.0)).inner_margin(egui::Margin::same(18.0)).stroke(Stroke::new(1.0, C_BORDER)).show(ui, |ui| {
-            ui.set_max_width(520.0);
-            ui.label(RichText::new(title).font(FontId::proportional(13.0)).color(C_TEXT).strong());
-            ui.add_space(12.0);
-            content(ui, self);
-        });
-    }
-
     // ===================== LOGIN POPUP =====================
 
     fn show_login_popup(&mut self, ctx: &egui::Context) {
         let mut open = self.show_login;
-        egui::Window::new("Iniciar sesión para descargar").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).open(&mut open).frame(egui::Frame::none().fill(C_PANEL).rounding(Rounding::same(10.0)).stroke(Stroke::new(1.0, C_BORDER))).show(ctx, |ui| {
-            ui.set_min_width(380.0);
-            egui::Frame::none().inner_margin(egui::Margin::same(20.0)).show(ui, |ui| {
+        egui::Window::new("Iniciar sesión para descargar").collapsible(false).resizable(false).anchor(egui::Align2::CENTER_CENTER, Vec2::ZERO).open(&mut open)
+            .frame(egui::Frame::none().fill(C_PANEL).rounding(Rounding::same(10.0)).stroke(Stroke::new(1.0, C_BORDER)).inner_margin(egui::Margin::same(22.0)))
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
                 ui.label(RichText::new("SteamCMD descargará el juego en segundo plano.").font(FontId::proportional(13.0)).color(C_TEXT));
                 ui.add_space(4.0);
                 ui.label(RichText::new("Tus credenciales se guardan solo en tu PC.").font(FontId::proportional(11.0)).color(C_TEXT_DIM));
                 ui.add_space(16.0);
                 ui.label(RichText::new("Usuario").font(FontId::proportional(12.0)).color(C_TEXT_DIM));
                 ui.add_space(3.0);
-                ui.add(egui::TextEdit::singleline(&mut self.steamcmd_user).desired_width(340.0).text_color(C_TEXT));
+                ui.add(egui::TextEdit::singleline(&mut self.steamcmd_user).desired_width(320.0).text_color(C_TEXT));
                 ui.add_space(10.0);
                 ui.label(RichText::new("Contraseña").font(FontId::proportional(12.0)).color(C_TEXT_DIM));
                 ui.add_space(3.0);
-                ui.add(egui::TextEdit::singleline(&mut self.steamcmd_pass).desired_width(340.0).password(true).text_color(C_TEXT));
+                ui.add(egui::TextEdit::singleline(&mut self.steamcmd_pass).desired_width(320.0).password(true).text_color(C_TEXT));
                 ui.add_space(10.0);
                 ui.label(RichText::new("Steam Guard (opcional)").font(FontId::proportional(12.0)).color(C_TEXT_DIM));
                 ui.add_space(3.0);
                 ui.add(egui::TextEdit::singleline(&mut self.steamcmd_guard).desired_width(200.0).hint_text("Déjalo vacío").text_color(C_TEXT));
                 ui.add_space(18.0);
                 ui.horizontal(|ui| {
-                    if ui.add(egui::Button::new(RichText::new("⬇  Descargar").font(FontId::proportional(12.0)).color(Color32::WHITE).strong()).fill(C_BTN_GREEN).rounding(Rounding::same(5.0)).min_size(Vec2::new(130.0, 32.0))).clicked() {
+                    if ui.add(egui::Button::new(RichText::new("⬇  Descargar").font(FontId::proportional(12.0)).color(Color32::WHITE).strong()).fill(C_BTN_GREEN).rounding(Rounding::same(5.0)).min_size(Vec2::new(120.0, 32.0))).clicked() {
                         if let Some(id) = self.pending_appid { self.show_login = false; self.do_download(id); self.pending_appid = None; }
                     }
                     ui.add_space(8.0);
@@ -852,7 +944,6 @@ impl SteamLite {
                     }
                 });
             });
-        });
         if !open { self.show_login = false; }
     }
 }
@@ -865,15 +956,16 @@ impl eframe::App for SteamLite {
         style.visuals.dark_mode = true;
         style.visuals.panel_fill = C_BG;
         style.visuals.window_fill = C_PANEL;
-        style.visuals.window_rounding = Rounding::same(10.0);
-        style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(28, 36, 50);
-        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(38, 50, 70);
-        style.visuals.widgets.active.bg_fill = Color32::from_rgb(45, 60, 85);
+        style.visuals.window_rounding = Rounding::same(8.0);
+        style.visuals.window_shadow = egui::epaint::Shadow { blur: 20, spread: 0, offset: [0, 4].into(), color: Color32::from_black_alpha(80) };
+        style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(26, 33, 46);
+        style.visuals.widgets.hovered.bg_fill = Color32::from_rgb(35, 46, 65);
+        style.visuals.widgets.active.bg_fill = Color32::from_rgb(42, 56, 80);
         style.visuals.widgets.inactive.rounding = Rounding::same(4.0);
         style.visuals.widgets.hovered.rounding = Rounding::same(4.0);
         style.visuals.selection.bg_fill = C_BTN;
-        style.visuals.selection.stroke = Stroke::new(0.0, Color32::TRANSPARENT);
-        style.spacing.item_spacing = Vec2::new(8.0, 4.0);
+        style.spacing.item_spacing = Vec2::new(6.0, 4.0);
+        style.spacing.button_padding = Vec2::new(8.0, 4.0);
         ctx.set_style(style);
 
         {
